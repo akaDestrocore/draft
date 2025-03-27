@@ -2,35 +2,61 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Cargo Build Debug",
+            "label": "Build All Release",
             "type": "shell",
-            "command": "source /home/lapsw1-2024/rust-env.sh && cargo build",
-            "options": {
-                "env": {
-                    "PATH": "/home/lapsw1-2024/cargo-standalone/bin:${env:PATH}"
-                }
-            },
+            "command": "${workspaceFolder}/build.ps1",
+            "group": "build",
+            "problemMatcher": ["$rustc"]
+        },
+        {
+            "label": "Build All Debug",
+            "type": "shell",
+            "command": "${workspaceFolder}/build.ps1 debug",
             "group": {
                 "kind": "build",
                 "isDefault": true
             },
-            "problemMatcher": [
-                "$rustc"
-            ]
+            "problemMatcher": ["$rustc"]
         },
         {
-            "label": "Cargo Build Release",
+            "label": "Build Boot Debug",
             "type": "shell",
-            "command": "source /home/lapsw1-2024/rust-env.sh && cargo build --release",
-            "options": {
-                "env": {
-                    "PATH": "/home/lapsw1-2024/cargo-standalone/bin:${env:PATH}"
-                }
-            },
+            "command": "cargo build -p boot",
             "group": "build",
-            "problemMatcher": [
-                "$rustc"
-            ]
+            "problemMatcher": ["$rustc"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            }
+        },
+        {
+            "label": "Build Loader Debug",
+            "type": "shell",
+            "command": "cargo build -p loader",
+            "group": "build",
+            "problemMatcher": ["$rustc"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            }
+        },
+        {
+            "label": "Build Updater Debug",
+            "type": "shell",
+            "command": "cargo build -p updater",
+            "group": "build",
+            "problemMatcher": ["$rustc"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            }
+        },
+        {
+            "label": "Build Application Debug",
+            "type": "shell",
+            "command": "cargo build -p application",
+            "group": "build",
+            "problemMatcher": ["$rustc"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            }
         }
     ]
 }
