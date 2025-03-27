@@ -56,13 +56,13 @@ fn sysclock_config() {
             // PLL source -> HSE
             w.pllsrc().hse()
 
-            .pllm().bits(8)
+            .pllm().bits(4)
 
-            .plln().bits(336)
+            .plln().bits(90)
 
             .pllp().div2()
 
-            .pllq().bits(7)
+            .pllq().bits(4)
         });
 
         // PLLON

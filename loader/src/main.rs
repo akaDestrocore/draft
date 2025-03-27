@@ -41,26 +41,26 @@ fn jump_to_user_application() -> ! {
         let reset_ptr: u32 = *(reset_addr as *const u32);
 
         // Deinit RCC
-        p.rcc.cr.modify(|_,w| w
+        p.rcc.cr().modify(|_,w| w
             .hsion().set_bit()
             .hseon().clear_bit()
             .pllon().clear_bit()
         );
         
-        while p.rcc.cr.read().hsirdy().bit_is_clear() {
+        while p.rcc.cr().read().hsirdy().bit_is_clear() {
             // wait
         }
 
-        p.rcc.cfgr.modify(|_, w| w.sw().hsi());
+        p.rcc.cfgr().modify(|_, w| w.sw().hsi());
         
-        while !p.rcc.cfgr.read().sws().is_hsi() {
+        while !p.rcc.cfgr().read().sws().is_hsi() {
             // wait
         }
         
-        p.rcc.cfgr.reset();
+        p.rcc.cfgr().reset();
 
         // remap
-        p.syscfg.memrm.modify(|_, w| w.mem_mode().bits(0x1));
+        p.syscfg.memrm().modify(|_, w| w.mem_mode().bits(0x1));
         
         // Get SysTick from cortex_m directly
         let mut cp: cortex_m::Peripherals = cortex_m::Peripherals::steal();
@@ -106,26 +106,26 @@ fn jump_to_updater() -> ! {
         let reset_ptr: u32 = *(reset_addr as *const u32);
 
         // Deinit RCC
-        p.rcc.cr.modify(|_,w| w
+        p.rcc.cr().modify(|_,w| w
             .hsion().set_bit()
             .hseon().clear_bit()
             .pllon().clear_bit()
         );
         
-        while p.rcc.cr.read().hsirdy().bit_is_clear() {
+        while p.rcc.cr().read().hsirdy().bit_is_clear() {
             // wait
         }
 
-        p.rcc.cfgr.modify(|_, w| w.sw().hsi());
+        p.rcc.cfgr().modify(|_, w| w.sw().hsi());
         
-        while !p.rcc.cfgr.read().sws().is_hsi() {
+        while !p.rcc.cfgr().read().sws().is_hsi() {
             // wait
         }
         
-        p.rcc.cfgr.reset();
+        p.rcc.cfgr().reset();
 
         // remap
-        p.syscfg.memrm.modify(|_, w| w.mem_mode().bits(0x1));
+        p.syscfg.memrm().modify(|_, w| w.mem_mode().bits(0x1));
         
         // Get SysTick from cortex_m directly
         let mut cp: cortex_m::Peripherals = cortex_m::Peripherals::steal();
@@ -165,19 +165,19 @@ fn jump_to_updater() -> ! {
 // UART initialization
 fn uart_init(p: &pac::Peripherals) {
     // Enable UART2 clock
-    p.rcc.apb1enr.modify(|_, w| w.usart2en().set_bit());
+    p.rcc.apb1enr().modify(|_, w| w.usart2en().set_bit());
 
     // Enable GPIOA clock
-    p.rcc.ahb1enr.modify(|_, w| w.gpioaen().set_bit());
+    p.rcc.ahb1enr().modify(|_, w| w.gpioaen().set_bit());
 
     // Configure PA2 and PA3 as alternate function for UART
-    p.gpioa.moder.modify(|_, w| {
+    p.gpioa.moder().modify(|_, w| {
         w.moder2().alternate() // TX
          .moder3().alternate() // RX
     });
 
     // Set alternate function AF7 (USART2)
-    p.gpioa.afrl.modify(|_, w| {
+    p.gpioa.afrl().modify(|_, w| {
         w.afrl2().af7()
          .afrl3().af7()
     });
@@ -185,10 +185,10 @@ fn uart_init(p: &pac::Peripherals) {
     // Configure UART: 8N1, 115200 baud
     // BRR calculation: fCK / (16 * baud) = 45,000,000 / (16 * 115,200) = 24.41
     // Mantissa = 24, Fraction = 0.41 * 16 = 6.56 ≈ 7
-    p.usart2.brr.write(|w| unsafe { w.bits(0x187) }); // 24.7 = 0x187
+    p.usart2.brr().write(|w| unsafe { w.bits(0x187) }); // 24.7 = 0x187
 
     // Enable UART, transmitter and receiver, and RX interrupt
-    p.usart2.cr1.modify(|_, w| {
+    p.usart2.cr1().modify(|_, w| {
         w.ue().set_bit()
          .te().set_bit()
          .re().set_bit()
@@ -196,7 +196,7 @@ fn uart_init(p: &pac::Peripherals) {
     });
 
     // Enable error interrupt
-    p.usart2.cr3.modify(|_, w| w.eie().set_bit());
+    p.usart2.cr3().modify(|_, w| w.eie().set_bit());
 
     // Enable USART2 interrupt in NVIC
     unsafe {
@@ -207,34 +207,34 @@ fn uart_init(p: &pac::Peripherals) {
 // GPIO initialization
 fn gpio_init(p: &pac::Peripherals) {
     // Enable GPIO clocks
-    p.rcc.ahb1enr.modify(|_, w| {
+    p.rcc.ahb1enr().modify(|_, w| {
         w.gpioaen().set_bit() // GPIOA (user button)
          .gpioden().set_bit() // GPIOD (LEDs)
     });
 
     // Configure LED pins PD12-15
-    p.gpiod.moder.modify(|_, w| {
+    p.gpiod.moder().modify(|_, w| {
         w.moder12().output() // Green
          .moder13().output() // Orange
          .moder14().output() // Red
          .moder15().output() // Blue
     });
 
-    p.gpiod.otyper.modify(|_, w| {
+    p.gpiod.otyper().modify(|_, w| {
         w.ot12().push_pull()
          .ot13().push_pull()
          .ot14().push_pull()
          .ot15().push_pull()
     });
 
-    p.gpiod.ospeedr.modify(|_, w| {
+    p.gpiod.ospeedr().modify(|_, w| {
         w.ospeedr12().very_high_speed()
          .ospeedr13().very_high_speed()
          .ospeedr14().very_high_speed()
          .ospeedr15().very_high_speed()
     });
 
-    p.gpiod.pupdr.modify(|_, w| {
+    p.gpiod.pupdr().modify(|_, w| {
         w.pupdr12().pull_down()
          .pupdr13().pull_down()
          .pupdr14().pull_down()
@@ -242,11 +242,11 @@ fn gpio_init(p: &pac::Peripherals) {
     });
 
     // Configure user button (PA0)
-    p.gpioa.moder.modify(|_, w| w.moder0().input());
-    p.gpioa.pupdr.modify(|_, w| w.pupdr0().pull_down());
+    p.gpioa.moder().modify(|_, w| w.moder0().input());
+    p.gpioa.pupdr().modify(|_, w| w.pupdr0().pull_down());
 
     // Initialize LEDs to off state
-    p.gpiod.bsrr.write(|w| {
+    p.gpiod.bsrr().write(|w| {
         w.br12().set_bit()
          .br13().set_bit()
          .br14().set_bit()
@@ -257,48 +257,48 @@ fn gpio_init(p: &pac::Peripherals) {
 // System clock configuration
 fn sysclock_config(p: &pac::Peripherals) {
     // Enable power interface clock
-    p.rcc.apb1enr.modify(|_, w| w.pwren().set_bit());
+    p.rcc.apb1enr().modify(|_, w| w.pwren().set_bit());
     
     // Set voltage regulator scaling
     unsafe {
-        p.pwr.cr.modify(|r, w| {
+        p.pwr.cr().modify(|r, w| {
             let bits: u32 = r.bits() | (1 << 14);
             w.bits(bits)
         });
-    }
 
-    // Enable HSE
-    p.rcc.cr.modify(|_, w| w.hseon().set_bit());
-    while p.rcc.cr.read().hserdy().bit_is_clear() {
-        // wait
-    }
-    
-    // Configure PLL
-    p.rcc.pllcfgr.modify(|_, w| {
-        w.pllsrc().hse()
-         .pllm().bits(4)
-         .plln().bits(90)
-         .pllp().div2()
-         .pllq().bits(4)
-    });
+        // Enable HSE
+        p.rcc.cr().modify(|_, w| w.hseon().set_bit());
+        while p.rcc.cr().read().hserdy().bit_is_clear() {
+            // wait
+        }
+        
+        // Configure PLL
+        p.rcc.pllcfgr().modify(|_, w| {
+            w.pllsrc().hse()
+            .pllm().bits(4)
+            .plln().bits(90)
+            .pllp().div2()
+            .pllq().bits(4)
+        });
 
-    // Enable PLL
-    p.rcc.cr.modify(|_, w| w.pllon().set_bit());
-    while p.rcc.cr.read().pllrdy().bit_is_clear() {
-        // wait
-    }
+        // Enable PLL
+        p.rcc.cr().modify(|_, w| w.pllon().set_bit());
+        while p.rcc.cr().read().pllrdy().bit_is_clear() {
+            // wait
+        }
 
-    // Configure bus dividers
-    p.rcc.cfgr.modify(|_, w| {
-        w.hpre().div1()
-         .ppre1().div4()
-         .ppre2().div2()
-         .sw().pll()
-    });
+        // Configure bus dividers
+        p.rcc.cfgr().modify(|_, w| {
+            w.hpre().div1()
+            .ppre1().div4()
+            .ppre2().div2()
+            .sw().pll()
+        });
 
-    // Wait for PLL to be selected as system clock
-    while !p.rcc.cfgr.read().sws().is_pll() {
-        // wait
+        // Wait for PLL to be selected as system clock
+        while !p.rcc.cfgr().read().sws().is_pll() {
+            // wait
+        }
     }
 }
 
@@ -306,12 +306,12 @@ fn sysclock_config(p: &pac::Peripherals) {
 fn send_string(p: &pac::Peripherals, s: &str) {
     for c in s.bytes() {
         // Wait for TXE flag
-        while p.usart2.sr.read().txe().bit_is_clear() {
+        while p.usart2.sr().read().txe().bit_is_clear() {
             asm::nop();
         }
         
         // Send byte
-        p.usart2.dr.write(|w| unsafe { w.bits(c as u32) });
+        p.usart2.dr().write(|w| unsafe { w.bits(c as u32) });
     }
 }
 
@@ -364,8 +364,8 @@ fn read_key(p: &pac::Peripherals) {
     unsafe {
         if RX_BYTE == 0 {
             // Check if we've received data
-            if p.usart2.sr.read().rxne().bit_is_set() {
-                RX_BYTE = p.usart2.dr.read().bits() as u8;
+            if p.usart2.sr().read().rxne().bit_is_set() {
+                RX_BYTE = p.usart2.dr().read().bits() as u8;
                 
                 match RX_BYTE {
                     b'U' => {
@@ -443,17 +443,17 @@ fn USART2() {
     let p = unsafe { pac::Peripherals::steal() };
     
     // Handle USART2 interrupt - simplified implementation
-    if p.usart2.sr.read().rxne().bit_is_set() {
+    if p.usart2.sr().read().rxne().bit_is_set() {
         // Data received - will be handled in the main loop
     }
     
     // Error handling
-    if p.usart2.sr.read().ore().bit_is_set() ||
-       p.usart2.sr.read().fe().bit_is_set() ||
-       p.usart2.sr.read().pe().bit_is_set() {
+    if p.usart2.sr().read().ore().bit_is_set() ||
+       p.usart2.sr().read().fe().bit_is_set() ||
+       p.usart2.sr().read().pe().bit_is_set() {
         // Clear error flags by reading SR then DR
-        let _ = p.usart2.sr.read().bits();
-        let _ = p.usart2.dr.read().bits();
+        let _ = p.usart2.sr().read().bits();
+        let _ = p.usart2.dr().read().bits();
     }
 }
 
