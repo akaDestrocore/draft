@@ -4,7 +4,7 @@
 use core::panic::PanicInfo;
 use cortex_m::{asm, peripheral::{self, SCB, SYST}, register::{msp, psp}};
 use cortex_m_rt::entry;
-use stm32f4_pac as pac;
+use stm32f4_pac::{self as pac, Interrupt};
 
 use misc::RingBuffer;
 
@@ -21,6 +21,13 @@ static mut LOAD_APPLICATION: bool = false;
 const BOOT_TIMEOUT: u32 = 10000; // 10 seconds timeout
 static mut START_TICK: u32 = 0;
 static mut LOADING_OPTION_SELECTED: bool = false;
+
+// LED pins
+const GREEN_PIN: u16 = 12; // PD12
+const ORANGE_PIN: u16 = 13; // PD13
+const RED_PIN: u16 = 14; // PD14
+const BLUE_PIN: u16 = 15; // PD15
+const USER_BTN_PIN: u16 = 0; // PA0
 
 // Message types for display
 #[derive(Clone, Copy)]
@@ -438,24 +445,41 @@ fn main() -> ! {
     }
 }
 
-#[cortex_m_rt::exception]
+#[interrupt]
 fn USART2() {
     let p = unsafe { pac::Peripherals::steal() };
     
-    // Handle USART2 interrupt - simplified implementation
+    // Check if RX interrupt occurred
     if p.usart2.sr().read().rxne().bit_is_set() {
-        // Data received - will be handled in the main loop
+        // Read received data
+        let data = p.usart2.dr().read().bits() as u8;
+        
+        // Put in RX buffer
+        RX_BUFFER.write(data);
     }
     
-    // Error handling
-    if p.usart2.sr().read().ore().bit_is_set() ||
-       p.usart2.sr().read().fe().bit_is_set() ||
-       p.usart2.sr().read().pe().bit_is_set() {
-        // Clear error flags by reading SR then DR
+    // Check if TX interrupt occurred
+    if p.usart2.sr().read().txe().bit_is_set() {
+        // If there's data in the TX buffer, send it
+        if let Some(data) = TX_BUFFER.read() {
+            p.usart2.dr().write(|w| unsafe { w.bits(data as u32) });
+        } else {
+            // No more data to send, disable TX interrupt
+            p.usart2.cr1().modify(|_, w| w.txeie().clear_bit());
+            TX_BUFFER.set_tx_in_progress(false);
+        }
+    }
+    
+    // Check for errors
+    if p.usart2.sr().read().ore().bit_is_set() || 
+       p.usart2.sr().read().pe().bit_is_set() || 
+       p.usart2.sr().read().fe().bit_is_set() {
+        // Clear error flags by reading SR register followed by DR register
         let _ = p.usart2.sr().read().bits();
         let _ = p.usart2.dr().read().bits();
     }
 }
+
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
