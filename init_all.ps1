@@ -4,15 +4,27 @@ cargo install form
 cargo install cargo-binutils
 rustup component add llvm-tools-preview
 
+Write-Host "Downloading SVD file from URL..." -ForegroundColor Cyan
+$svdUrl = "https://stm32-rs.github.io/stm32-rs/stm32f407.svd.patched"
+$svdPath = "stm32f407.svd"
+
+try {
+    Invoke-WebRequest -Uri $svdUrl -OutFile $svdPath
+    Write-Host "SVD file downloaded successfully!" -ForegroundColor Green
+} catch {
+    Write-Host "Failed to download SVD file: $_" -ForegroundColor Red
+    exit 1
+}
+
 Write-Host "Creating directory structure..." -ForegroundColor Cyan
-New-Item -ItemType Directory -Path "stm32f4-pac" -Force | Out-Null
-Set-Location -Path "stm32f4-pac"
+New-Item -ItemType Directory -Path "stm32f407" -Force | Out-Null
+Set-Location -Path "stm32f407"
 
 Write-Host "Initializing Cargo library project..." -ForegroundColor Cyan
 cargo init --lib
 
 Write-Host "Generating Rust code from SVD..." -ForegroundColor Cyan
-svd2rust -i stm32f407.svd --target cortex-m -g
+svd2rust -i ../stm32f407.svd --target cortex-m -g
 
 Write-Host "Reorganizing project structure..." -ForegroundColor Cyan
 Remove-Item -Path "src" -Recurse -Force -ErrorAction SilentlyContinue
@@ -24,7 +36,7 @@ Move-Item -Path "build.rs" -Destination "./" -ErrorAction SilentlyContinue
 Write-Host "Creating Cargo.toml..." -ForegroundColor Cyan
 $cargoToml = @"
 [package]
-name = "stm32f4-pac"
+name = "stm32f407"
 version = "0.1.0"
 edition = "2021"
 description = "Low-level register access for STM32F407"
@@ -43,5 +55,8 @@ Set-Content -Path "Cargo.toml" -Value $cargoToml
 
 Set-Location -Path ".."
 
-Write-Host "STM32F4 PAC initialization completed successfully!" -ForegroundColor Green
+# Clean up the downloaded SVD file
+Remove-Item -Path $svdPath -Force
+
+Write-Host "STM32F407 PAC initialization completed successfully!" -ForegroundColor Green
 Write-Host "You can now build your firmware components." -ForegroundColor Green
