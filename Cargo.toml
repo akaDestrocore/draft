@@ -4,7 +4,7 @@ members = [
     "loader",
     "updater",
     "application",
-    "stm32f4-pac",
+    "stm32f4",
     "misc"
 ]
 
@@ -12,7 +12,7 @@ members = [
 cortex-m = "0.7.7"
 cortex-m-rt = { version = "0.7.3", features = ["device"] }
 panic-halt = "0.2.0"
-stm32f4-pac = { path = "./stm32f4-pac", features = ["rt"] }
+stm32f4 = { path = "./stm32f4", features = ["rt"] }
 
 [profile.release]
 codegen-units = 1

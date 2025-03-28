@@ -7,4 +7,4 @@ edition = "2021"
 cortex-m = { workspace = true }
 cortex-m-rt = { workspace = true }
 panic-halt = { workspace = true }
-stm32f4-pac = { workspace = true }
+stm32f407 = { workspace = true }
