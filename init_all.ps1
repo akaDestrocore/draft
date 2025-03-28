@@ -55,7 +55,6 @@ Set-Content -Path "Cargo.toml" -Value $cargoToml
 
 Set-Location -Path ".."
 
-# Clean up the downloaded SVD file
 Remove-Item -Path $svdPath -Force
 
 Write-Host "stm32f4 PAC initialization completed successfully!" -ForegroundColor Green

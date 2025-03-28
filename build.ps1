@@ -11,7 +11,6 @@ if ($args[0] -eq "debug") {
 if (-not (Test-Path -Path "stm32f4")) {
     Write-Host "stm32f4 PAC not found, generating from SVD..." -ForegroundColor Cyan
     
-    # Download SVD file from URL
     $svdUrl = "https://stm32-rs.github.io/stm32-rs/stm32f407.svd.patched"
     $svdPath = "stm32f407.svd.patched"
     
@@ -24,12 +23,10 @@ if (-not (Test-Path -Path "stm32f4")) {
         exit 1
     }
     
-    # Create directory structure
     Write-Host "Creating directory structure..." -ForegroundColor Cyan
     New-Item -ItemType Directory -Path "stm32f4" -Force | Out-Null
     Set-Location -Path "stm32f4"
     
-    # Initialize Cargo library project
     Write-Host "Initializing Cargo library project..." -ForegroundColor Cyan
     cargo init --lib
     if (-not $?) {
@@ -37,7 +34,6 @@ if (-not (Test-Path -Path "stm32f4")) {
         exit 1
     }
     
-    # Generate Rust code from SVD
     Write-Host "Generating Rust code from SVD..." -ForegroundColor Cyan
     svd2rust -i ../stm32f407.svd.patched --target cortex-m -g
     if (-not $?) {
@@ -45,7 +41,6 @@ if (-not (Test-Path -Path "stm32f4")) {
         exit 1
     }
     
-    # Reorganize project structure
     Write-Host "Reorganizing project structure..." -ForegroundColor Cyan
     Remove-Item -Path "src" -Recurse -Force -ErrorAction SilentlyContinue
     form -i lib.rs -o src/
@@ -58,7 +53,6 @@ if (-not (Test-Path -Path "stm32f4")) {
     Move-Item -Path "generic.rs" -Destination "src/"
     Move-Item -Path "build.rs" -Destination "./" -ErrorAction SilentlyContinue
     
-    # Create Cargo.toml
     Write-Host "Creating Cargo.toml..." -ForegroundColor Cyan
     $cargoToml = @"
 [package]
@@ -81,7 +75,6 @@ rt = ["cortex-m-rt"]
     
     Set-Location -Path ".."
     
-    # Clean up the downloaded SVD file
     Remove-Item -Path $svdPath -Force
     
     Write-Host "stm32f4 PAC initialization completed successfully!" -ForegroundColor Green
@@ -163,7 +156,7 @@ if (-not (Test-Path -Path "merged_firmware.bin")) {
 
 Write-Host "Firmware file created successfully." -ForegroundColor Green
 Write-Host "To flash the device with the merged firmware, run:" -ForegroundColor Cyan
-Write-Host "probe-rs download --chip STM32F407VGTx --format bin --base-address 0x08000000 merged_firmware.bin" -ForegroundColor Cyan
+Write-Host "probe-rs download --chip STM32F407VGTx --binary-format bin --base-address 0x08000000 merged_firmware.bin" -ForegroundColor Cyan
 
 if ($args[1] -eq "flash") {
     Write-Host "Flashing device with merged firmware..." -ForegroundColor Cyan
