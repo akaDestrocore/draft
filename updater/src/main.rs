@@ -4,13 +4,13 @@
 use core::panic::PanicInfo;
 use cortex_m::asm;
 use cortex_m_rt::entry;
-use stm32f4_pac as pac;
+use stm32f4 as pac;
 
 
 #[entry]
 fn main() -> ! {
     // PD12 init 
-    let peripherals: stm32f4_pac::Peripherals = unsafe { pac::Peripherals::steal() };
+    let peripherals: stm32f4::Peripherals = unsafe { pac::Peripherals::steal() };
     
     // Enable GPIOD clock
     unsafe {

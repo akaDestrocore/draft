@@ -4,7 +4,7 @@
 use core::panic::PanicInfo;
 use cortex_m::{asm, peripheral::{self, SCB, SYST}, register::{msp, psp}};
 use cortex_m_rt::entry;
-use stm32f4_pac as pac;
+use stm32f4 as pac;
 
 const LOADER_ADDR: u32 = 0x08004000;
 const UPDATER_ADDR: u32 = 0x08008000;
@@ -118,7 +118,7 @@ fn jump_to_updater() -> ! {
         p.rcc.cfgr().reset();
 
         // remap
-        p.syscfg.memrm().modify(|_, w| w.mem_mode().bits(0x1));
+        p.syscfg.memrmp().modify(|_, w| w.mem_mode().bits(0x1));
         
         // Get SysTick from cortex_m directly
         let mut cp: cortex_m::Peripherals = cortex_m::Peripherals::steal();
@@ -179,7 +179,7 @@ fn jump_to_loader() -> ! {
         p.rcc.cfgr().reset();
 
         // remap
-        p.syscfg.memrm().modify(|_, w| w.mem_mode().bits(0x1));
+        p.syscfg.memrmp().modify(|_, w| w.mem_mode().bits(0x1));
         
         // Get SysTick from cortex_m directly
         let mut cp: cortex_m::Peripherals = cortex_m::Peripherals::steal();

@@ -6,7 +6,7 @@ members = [
     "application",
     "stm32f4",
     "misc"
-]
+, "stm32f4-pac"]
 
 [workspace.dependencies]
 cortex-m = "0.7.7"

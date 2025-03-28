@@ -20,7 +20,7 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "panic-halt",
- "stm32f407",
+ "stm32f4",
 ]
 
 [[package]]
@@ -75,7 +75,7 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "panic-halt",
- "stm32f407",
+ "stm32f4",
 ]
 
 [[package]]
@@ -253,7 +253,7 @@ dependencies = [
  "cortex-m-rt",
  "misc",
  "panic-halt",
- "stm32f407",
+ "stm32f4",
 ]
 
 [[package]]
@@ -373,7 +373,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a8f112729512f8e442d81f95a8a7ddf2b7c6b8a1a6f509a95864142b30cab2d3"
 
 [[package]]
-name = "stm32f407"
+name = "stm32f4"
 version = "0.1.0"
 dependencies = [
  "bare-metal 1.0.0",
@@ -381,6 +381,10 @@ dependencies = [
  "cortex-m-rt",
  "vcell",
 ]
+
+[[package]]
+name = "stm32f4-pac"
+version = "0.1.0"
 
 [[package]]
 name = "subtle"
@@ -422,7 +426,7 @@ dependencies = [
  "cortex-m-rt",
  "heapless",
  "panic-halt",
- "stm32f407",
+ "stm32f4",
 ]
 
 [[package]]

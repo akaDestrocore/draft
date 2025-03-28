@@ -8,14 +8,14 @@ if ($args[0] -eq "debug") {
     Write-Host "Building in release mode..."
 }
 
-if (-not (Test-Path -Path "stm32f407")) {
+if (-not (Test-Path -Path "stm32f4")) {
     Write-Host "Generating PAC from SVD..."
-    New-Item -ItemType Directory -Path "stm32f407" | Out-Null
-    Set-Location -Path "stm32f407"
+    New-Item -ItemType Directory -Path "stm32f4" | Out-Null
+    Set-Location -Path "stm32f4"
     
     cargo init --lib
     if (-not $?) {
-        Write-Host "Failed to initialize stm32f407 library!"
+        Write-Host "Failed to initialize stm32f4 library!"
         exit 1
     }
     
@@ -43,7 +43,7 @@ fn main() {
     
     @"
 [package]
-name = "stm32f407"
+name = "stm32f4"
 version = "0.1.0"
 edition = "2021"
 description = "Low-level register access for STM32F407"
