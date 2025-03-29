@@ -9,17 +9,20 @@ use stm32f4::Interrupt as interrupt;
 use misc::RingBuffer;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-// Constants for memory addresses
-const SLOT_2_APP_ADDR: u32 = 0x08020200;
-const UPDATER_ADDR: u32 = 0x08008000;
-const SLOT_2_VER_ADDR: u32 = 0x08020000;
-
-// Global variables
+// ring buffers
 #[link_section = ".uninit.RX_BUFFER"]
 static mut RX_BUFFER: RingBuffer = RingBuffer::new();
 
 #[link_section = ".uninit.TX_BUFFER"]
 static mut TX_BUFFER: RingBuffer = RingBuffer::new();
+
+static mut USART2_PTR: Option<*mut stm32f4::usart1::RegisterBlock> = None;
+
+// Constants for memory addresses
+const SLOT_2_APP_ADDR: u32 = 0x08020200;
+const UPDATER_ADDR: u32 = 0x08008000;
+const SLOT_2_VER_ADDR: u32 = 0x08020000;
+
 
 static TX_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static LOAD_APPLICATION: AtomicBool = AtomicBool::new(false);
@@ -41,6 +44,11 @@ fn main() -> ! {
     usart_init(&p);
     
     // Enable USART2 interrupt
+    unsafe {
+        USART2_PTR = Some(p.usart2.dr().as_ptr() as *mut _);
+    }
+
+    // enable USART irq
     unsafe {
         cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USART2);
     }
@@ -312,149 +320,158 @@ fn read_key(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) {
 }
 
 fn jump_to_user_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
-    send_string("\r\nLoading user application now.\r\n\r\n");
+    
+    let reset_addr: u32 = SLOT_2_APP_ADDR + 4;
+    let reset_ptr: u32 = unsafe { *(reset_addr as *const u32) };
+    let stack_ptr: u32 = unsafe { *(SLOT_2_APP_ADDR as *const u32) };
+
+    p.rcc.cfgr().reset();
+    p.rcc.cr().modify(|_, w| w.hsion().set_bit());
+    
+    // Wait for HSI to be ready
+    while p.rcc.cr().read().hsirdy().bit_is_clear() {
+        // wait
+    }
+    
+    p.rcc.cr().modify(|_, w| w
+        .hseon().clear_bit()
+        .pllon().clear_bit()
+    );
+    while !p.rcc.cfgr().read().sws().is_hsi() {
+        // wait
+    }
+    
+    p.rcc.apb2enr().modify(|_, w| w.syscfgen().set_bit());
+
+    // remap
     unsafe {
-        let reset_addr: u32 = SLOT_2_APP_ADDR + 4;
-        let reset_ptr: u32 = *(reset_addr as *const u32);
-
-        // Deinit RCC
-        p.rcc.cr().modify(|_,w| w
-            .hsion().set_bit()
-            .hseon().clear_bit()
-            .pllon().clear_bit()
-        );
-        while p.rcc.cr().read().hsirdy().bit_is_clear() {
-            // wait
-        }
-
-        p.rcc.cfgr().modify(|_, w | w.sw().hsi());
-        while !p.rcc.cfgr().read().sws().is_hsi() {
-            // wait
-        }
-        p.rcc.cfgr().reset();
-
-        // remap
-        p.syscfg.memrmp().modify(|_, w| w.mem_mode().bits(0x1));
-        
-        // Get SysTick from cortex_m directly
-        let systick: &mut SYST = &mut cp.SYST;
-        systick.disable_counter();
-        systick.disable_interrupt();
-
-        // clear PendSV
-        let scb: *const peripheral::scb::RegisterBlock = SCB::PTR;
-        (*scb).icsr.write(0);
-
-        // disable SCB error handlers
-        (*scb).shcsr.modify(|v: u32| v & !(
-            (1 << 18) | (1 << 17) | (1 << 16)
+        p.syscfg.memrmp().write(|w| w.bits(0x01));
+    }
+    
+    
+    // Disable SysTick
+    let systick: &mut SYST = &mut cp.SYST;
+    systick.disable_counter();
+    systick.disable_interrupt();
+    
+    // Clear pendSV
+    unsafe {
+        let scb: *mut peripheral::scb::RegisterBlock = SCB::PTR as *mut _;
+        let icsr: u32 = (*scb).icsr.read();
+        (*scb).icsr.write(icsr | (1 << 25)); // PENDSTCLR bit
+    }
+    
+    unsafe {
+        let scb: *mut peripheral::scb::RegisterBlock = SCB::PTR as *mut _;
+        (*scb).shcsr.modify(|v| v & !(
+            (1 << 18) | // USGFAULTENA
+            (1 << 17) | // BUSFAULTENA 
+            (1 << 16)   // MEMFAULTENA
         ));
         
-        // set vector table
+        // Set vector table offset
         (*scb).vtor.write(SLOT_2_APP_ADDR);
-
+        
         // SP
-        let stack_ptr: u32 = *(SLOT_2_APP_ADDR as *const u32);
-
-        // Set MSP and PSP
-        msp::write(stack_ptr);
-        psp::write(stack_ptr);
-
-        // do the jump
+        core::arch::asm!("MSR msp, {0}", in(reg) stack_ptr);
+        
         let jump_fn: unsafe extern "C" fn() -> ! = core::mem::transmute(reset_ptr);
         jump_fn();
     }
-
+    
 }
 
 fn jump_to_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
     
+    let reset_addr: u32 = UPDATER_ADDR + 4;
+    let reset_ptr: u32 = unsafe { *(reset_addr as *const u32) };
+    let stack_ptr: u32 = unsafe { *(UPDATER_ADDR as *const u32) };
+
+    p.rcc.cfgr().reset();
+    p.rcc.cr().modify(|_, w| w.hsion().set_bit());
+    
+    // Wait for HSI to be ready
+    while p.rcc.cr().read().hsirdy().bit_is_clear() {
+        // wait
+    }
+    
+    p.rcc.cr().modify(|_, w| w
+        .hseon().clear_bit()
+        .pllon().clear_bit()
+    );
+    while !p.rcc.cfgr().read().sws().is_hsi() {
+        // wait
+    }
+    
+    p.rcc.apb2enr().modify(|_, w| w.syscfgen().set_bit());
+
+    // remap
     unsafe {
-        let reset_addr: u32 = UPDATER_ADDR + 4;
-        let reset_ptr: u32 = *(reset_addr as *const u32);
-
-        // Deinit RCC
-        p.rcc.cr().modify(|_,w| w
-            .hsion().set_bit()
-            .hseon().clear_bit()
-            .pllon().clear_bit()
-        );
-        while p.rcc.cr().read().hsirdy().bit_is_clear() {
-            // wait
-        }
-
-        p.rcc.cfgr().modify(|_, w | w.sw().hsi());
-        while !p.rcc.cfgr().read().sws().is_hsi() {
-            // wait
-        }
-        p.rcc.cfgr().reset();
-
-        // remap
-        p.syscfg.memrmp().modify(|_, w| w.mem_mode().bits(0x1));
-        
-        // Get SysTick from cortex_m directly
-        let systick: &mut SYST = &mut cp.SYST;
-        systick.disable_counter();
-        systick.disable_interrupt();
-
-        // clear PendSV
-        let scb: *const peripheral::scb::RegisterBlock = SCB::PTR;
-        (*scb).icsr.write(0);
-
-        // disable SCB error handlers
-        (*scb).shcsr.modify(|v: u32| v & !(
-            (1 << 18) | (1 << 17) | (1 << 16)
+        p.syscfg.memrmp().write(|w| w.bits(0x01));
+    }
+    
+    
+    // Disable SysTick
+    let systick: &mut SYST = &mut cp.SYST;
+    systick.disable_counter();
+    systick.disable_interrupt();
+    
+    // Clear pendSV
+    unsafe {
+        let scb: *mut peripheral::scb::RegisterBlock = SCB::PTR as *mut _;
+        let icsr: u32 = (*scb).icsr.read();
+        (*scb).icsr.write(icsr | (1 << 25)); // PENDSTCLR bit
+    }
+    
+    unsafe {
+        let scb: *mut peripheral::scb::RegisterBlock = SCB::PTR as *mut _;
+        (*scb).shcsr.modify(|v| v & !(
+            (1 << 18) | // USGFAULTENA
+            (1 << 17) | // BUSFAULTENA 
+            (1 << 16)   // MEMFAULTENA
         ));
         
-        // set vector table
+        // Set vector table offset
         (*scb).vtor.write(UPDATER_ADDR);
-
+        
         // SP
-        let stack_ptr: u32 = *(UPDATER_ADDR as *const u32);
-
-        // Set MSP and PSP
-        msp::write(stack_ptr);
-        psp::write(stack_ptr);
-
-        // do the jump
+        core::arch::asm!("MSR msp, {0}", in(reg) stack_ptr);
+        
         let jump_fn: unsafe extern "C" fn() -> ! = core::mem::transmute(reset_ptr);
         jump_fn();
     }
-
+    
 }
 
 // USART2 interrupt handler
 #[cortex_m_rt::interrupt]
 fn USART2() {
-    cortex_m::interrupt::free(|_| {
-        unsafe {
-            let p: stm32f4::Peripherals = pac::Peripherals::take().unwrap();
+    unsafe {
+        if let Some(usart2_ptr) = USART2_PTR {
+            let usart2 = &*usart2_ptr;
             
-            // Check for received data
-            if p.usart2.sr().read().rxne().bit_is_set() {
-                // Read data from DR register
-                let data: u8 = p.usart2.dr().read().bits() as u8;
-                
-                // Store in RX buffer
+            // Проверяем флаг приёма
+            if (*usart2).sr().read().rxne().bit_is_set() {
+                // Читаем данные
+                let data = (*usart2).dr().read().bits() as u8;
                 RX_BUFFER.write(data);
             }
             
-            // Check for TX empty
-            if p.usart2.sr().read().txe().bit_is_set() && p.usart2.cr1().read().txeie().bit_is_set() {
+            // Проверяем флаг передачи
+            if (*usart2).sr().read().txe().bit_is_set() && (*usart2).cr1().read().txeie().bit_is_set() {
                 TX_IN_PROGRESS.store(false, Ordering::SeqCst);
                 
-                // If more data to send
                 if let Some(byte) = TX_BUFFER.read() {
-                    // Send next byte
-                    p.usart2.dr().write(|w| w.bits(byte as u16));
+                    // Отправляем следующий байт
+                    (*usart2).dr().write(|w| w.bits(byte as u16));
                     TX_IN_PROGRESS.store(true, Ordering::SeqCst);
                 } else {
-                    // No more data, disable TXE interrupt
-                    p.usart2.cr1().modify(|_, w| w.txeie().clear_bit());
+                    // Данных больше нет, отключаем прерывание TXE
+                    (*usart2).cr1().modify(|_, w| w.txeie().clear_bit());
                 }
             }
         }
-    });
+    }
 }
 
 #[panic_handler]

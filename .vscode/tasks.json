@@ -4,26 +4,32 @@
         {
             "label": "Build All Release",
             "type": "shell",
-            "command": "${workspaceFolder}/build.ps1",
-            "group": "build",
-            "problemMatcher": ["$rustc"]
+            "command": "${workspaceFolder}/build.ps1 release flash",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [
+                "$rustc"
+            ]
         },
         {
             "label": "Build All Debug",
             "type": "shell",
             "command": "${workspaceFolder}/build.ps1 debug",
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
-            "problemMatcher": ["$rustc"]
+            "group": "build",
+            "problemMatcher": [
+                "$rustc"
+            ]
         },
         {
             "label": "Build Boot Debug",
             "type": "shell",
             "command": "cargo build -p boot",
             "group": "build",
-            "problemMatcher": ["$rustc"],
+            "problemMatcher": [
+                "$rustc"
+            ],
             "options": {
                 "cwd": "${workspaceFolder}"
             }
@@ -33,7 +39,9 @@
             "type": "shell",
             "command": "cargo build -p loader",
             "group": "build",
-            "problemMatcher": ["$rustc"],
+            "problemMatcher": [
+                "$rustc"
+            ],
             "options": {
                 "cwd": "${workspaceFolder}"
             }
@@ -43,7 +51,9 @@
             "type": "shell",
             "command": "cargo build -p updater",
             "group": "build",
-            "problemMatcher": ["$rustc"],
+            "problemMatcher": [
+                "$rustc"
+            ],
             "options": {
                 "cwd": "${workspaceFolder}"
             }
@@ -53,7 +63,9 @@
             "type": "shell",
             "command": "cargo build -p application",
             "group": "build",
-            "problemMatcher": ["$rustc"],
+            "problemMatcher": [
+                "$rustc"
+            ],
             "options": {
                 "cwd": "${workspaceFolder}"
             }
