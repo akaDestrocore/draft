@@ -6,7 +6,7 @@ members = [
     "application",
     "stm32f4",
     "misc"
-, "stm32f4"]
+]
 
 [workspace.dependencies]
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
