@@ -5,6 +5,7 @@ use core::panic::PanicInfo;
 use cortex_m::{asm, peripheral::{self, SCB, SYST}, register::{msp, psp}};
 use cortex_m_rt::{entry, exception};
 use stm32f4 as pac;
+use stm32f4::Interrupt as interrupt;
 use misc::RingBuffer;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -257,20 +258,19 @@ fn send_string(s: &str) {
 }
 
 // Start buffer transmission
-// Start buffer transmission
 fn transmit_buffer() {
     cortex_m::interrupt::free(|_| {
         if !TX_IN_PROGRESS.load(Ordering::SeqCst) {
             unsafe {
                 if let Some(byte) = TX_BUFFER.read() {
                     // Get USART2 register block
-                    let usart2 = &(*pac::USART2::ptr());
+                    let p: stm32f4::Peripherals = pac::Peripherals::take().unwrap();
                     
                     // Write data to DR register
-                    usart2.dr.write(|w| w.bits(byte as u16));
+                    p.usart2.dr().write(|w| w.bits(byte as u16));
                     
                     // Enable TXE interrupt
-                    usart2.cr1.modify(|r, w| w.txeie().set_bit());
+                    p.usart2.cr1().modify(|_, w| w.txeie().set_bit());
                     
                     TX_IN_PROGRESS.store(true, Ordering::SeqCst);
                 }
@@ -280,7 +280,7 @@ fn transmit_buffer() {
 }
 
 // Read keypress from UART
-fn read_key(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
+fn read_key(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) {
     unsafe {
         let mut rx_byte: Option<u8> = None;
         
@@ -428,29 +428,29 @@ fn jump_to_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
 fn USART2() {
     cortex_m::interrupt::free(|_| {
         unsafe {
-            let usart2 = &(*pac::USART2::ptr());
+            let p: stm32f4::Peripherals = pac::Peripherals::take().unwrap();
             
             // Check for received data
-            if usart2.sr.read().rxne().bit() {
+            if p.usart2.sr().read().rxne().bit_is_set() {
                 // Read data from DR register
-                let data = usart2.dr.read().bits() as u8;
+                let data: u8 = p.usart2.dr().read().bits() as u8;
                 
                 // Store in RX buffer
                 RX_BUFFER.write(data);
             }
             
             // Check for TX empty
-            if usart2.sr.read().txe().bit() && usart2.cr1.read().txeie().bit() {
+            if p.usart2.sr().read().txe().bit_is_set() && p.usart2.cr1().read().txeie().bit_is_set() {
                 TX_IN_PROGRESS.store(false, Ordering::SeqCst);
                 
                 // If more data to send
                 if let Some(byte) = TX_BUFFER.read() {
                     // Send next byte
-                    usart2.dr.write(|w| w.bits(byte as u16));
+                    p.usart2.dr().write(|w| w.bits(byte as u16));
                     TX_IN_PROGRESS.store(true, Ordering::SeqCst);
                 } else {
                     // No more data, disable TXE interrupt
-                    usart2.cr1.modify(|_, w| w.txeie().clear_bit());
+                    p.usart2.cr1().modify(|_, w| w.txeie().clear_bit());
                 }
             }
         }
