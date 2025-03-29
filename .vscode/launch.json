@@ -45,7 +45,7 @@
             "type": "cortex-debug",
             "request": "launch",
             "cwd": "${workspaceFolder}",
-            "executable": "${workspaceFolder}/target/thumbv7em-none-eabihf/debug/updater",
+            "executable": "${workspaceFolder}/target/thumbv7em-none-eabihf/release/updater",
             "servertype": "stlink",
             "stm32cubeprogrammer": "${config:STM32VSCodeExtension.cubeCLT.path}/STM32CubeProgrammer/bin",
             "device": "STM32F407VGTx",
@@ -59,7 +59,7 @@
                 "tbreak updater::__cortex_m_rt_main",
                 "continue"
             ],
-            "preLaunchTask": "Build Updater Debug"
+            // "preLaunchTask": "Build Updater Debug"
         },
         {
             "name": "Debug Application",

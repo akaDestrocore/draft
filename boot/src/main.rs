@@ -15,7 +15,7 @@ fn main() -> ! {
     let p: stm32f4::Peripherals = pac::Peripherals::take().unwrap();
     let mut cp: cortex_m::Peripherals = cortex_m::Peripherals::take().unwrap();
 
-    sysclock_config(&p);
+    system_clock_config(&p);
 
     let loader_is_valid: bool = unsafe {
         let loader_value: u32 = *{LOADER_ADDR as *const u32};
@@ -34,7 +34,7 @@ fn main() -> ! {
     }
 }
 
-fn sysclock_config(p: &pac::Peripherals) {
+fn system_clock_config(p: &pac::Peripherals) {
     let rcc = &p.rcc;
     let pwr = &p.pwr;
     let flash = &p.flash;
