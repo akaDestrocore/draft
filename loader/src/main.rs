@@ -7,7 +7,7 @@ use core::{
 
 use cortex_m::{
     asm,
-    peripheral::{self, SCB, SYST}
+    peripheral::{self, NVIC, SCB, SYST}
 };
 
 use cortex_m_rt::{entry, exception};
@@ -106,8 +106,26 @@ fn main() -> ! {
 
     send_welcome_message_polling(&p);
 
+    unsafe {
+        cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USART2);
+
+        // enable USART2 interrupts
+        p.usart2.cr1().modify(|_, w| w
+            .rxneie().enabled()
+            .txeie().enabled()
+        );
+    }
+
     loop {
-        asm::nop();
+        process_input();
+
+        if LOAD_APPLICATION.load(Ordering::SeqCst) {
+            boot_application(&p, &mut cp);
+        }
+
+        ensure_transmitting();
+
+        asm::wfi();
     }
 }
 
@@ -119,12 +137,12 @@ fn setup_system_clock(p: &Peripherals) {
     p.pwr.cr().modify(|_, w| w.vos().scale1());
 
     // flash latency
-    p.flash.acr().modify(|_, w| unsafe {
-        w.latency().ws5()
+    p.flash.acr().modify(|_, w| w
+        .latency().ws5()
         .prften().set_bit()
         .icen().set_bit()
         .dcen().set_bit()
-    });
+    );
 
     // Enable HSE
     p.rcc.cr().modify(|_, w| w.hseon().set_bit());
@@ -216,8 +234,8 @@ fn setup_usart(p: &Peripherals) {
     p.rcc.apb1enr().modify(|_, w| w.usart2en().set_bit());
 
     p.usart2.brr().write(|w| unsafe {
-        w.div_mantissa().bits(0xc3)
-        .div_fraction().bits(0x5)
+        w.div_mantissa().bits(0xc)
+        .div_fraction().bits(0x3)
     });
 
     // enable error interrupts
@@ -419,6 +437,34 @@ fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
 
         let jump_fn: extern "C" fn() -> ! = core::mem::transmute(reset_vector);
         jump_fn();
+    }
+}
+
+fn process_input() {
+    if let Some(byte) = RX_BUFFER.get(|buf| buf.read()) {
+        match byte {
+            b'U' | b'u' => {
+                queue_string("\r\nBooting to updater...\r\n");
+                LOAD_APPLICATION.store(false, Ordering::SeqCst);
+
+                while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+                    ensure_transmitting();
+                }
+
+                let p: Peripherals = unsafe {pac::Peripherals::steal()};
+                let mut cp = unsafe {cortex_m::Peripherals::steal()};
+                boot_updater(&p, &mut cp)
+            },
+
+            b'\r' => {
+                queue_string("\r\nBooting application...\r\n");
+                LOAD_APPLICATION.store(true, Ordering::SeqCst);
+            },
+
+            _ => {
+                queue_string("\r\nPress 'U' for updater, 'Enter' for application\r\n");
+            }
+        }
     }
 }
 
