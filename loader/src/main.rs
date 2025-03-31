@@ -463,7 +463,7 @@ fn process_input() {
 
             _ => {
                 queue_string("\r\nPress 'U' for updater, 'Enter' for application\r\n");
-            },
+            }
         }
     }
 }
