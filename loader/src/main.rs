@@ -2,7 +2,7 @@
 #![no_main]
 
 use core::{
-    cell::UnsafeCell, iter::Cycle, panic::PanicInfo, sync::atomic::{AtomicBool, Ordering}
+    cell::UnsafeCell, iter::Cycle, panic::PanicInfo, sync::atomic::{AtomicBool, AtomicU32, Ordering}
 };
 
 use cortex_m::{
@@ -42,6 +42,9 @@ const SLOT_2_APP_ADDR: u32 = 0x08020200;
 const UPDATER_ADDR: u32 = 0x08008000;
 const SLOT_2_VER_ADDR: u32 = 0x08020000;
 const BOOT_TIMEOUT_MS: u32 = 10_000; // 10 sec
+
+// systick counter
+static TICK_MS: AtomicU32 = AtomicU32::new(0);
 
 // pointer wrappers
 struct PeripheralPtr<T>(*const T);
@@ -85,8 +88,8 @@ fn main() -> ! {
     setup_system_clock(&p);
 
     // get current time
-    let sys_tick: u32 = cortex_m::peripheral::SYST::get_current();
-    START_TIME.get(|time: &mut u32| *time = sys_tick);
+    let current_ms = TICK_MS.load(Ordering::Relaxed);
+    START_TIME.get(|time: &mut u32| *time = current_ms);
 
     setup_systick(&mut cp.SYST);
 
@@ -124,9 +127,9 @@ fn main() -> ! {
         }
 
         // check timeout
-        let current_tick: u32 = cortex_m::peripheral::SYST::get_current();
-        let start_tick: u32 = START_TIME.get(|time: &mut u32| *time);
-        if current_tick.wrapping_sub(start_tick) >= BOOT_TIMEOUT_MS {
+        let current_ms: u32 = TICK_MS.load(Ordering::Relaxed);
+        let start_ms: u32 = START_TIME.get(|time: &mut u32| *time);
+        if (current_ms - start_ms) >= BOOT_TIMEOUT_MS {
             queue_string("\r\nTimeout reached. Booting application...\r\n");
             
             // wait to finish
@@ -533,7 +536,8 @@ pub extern "C" fn USART2() {
 
 #[exception]
 fn SysTick() {
-    // counter for time
+    let current: u32 = TICK_MS.load(Ordering::Relaxed);
+    TICK_MS.store(current + 1, Ordering::Relaxed);
 }
 
 fn delay(cycles: u32) {
