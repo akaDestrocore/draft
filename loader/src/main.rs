@@ -123,6 +123,20 @@ fn main() -> ! {
             boot_application(&p, &mut cp);
         }
 
+        // check timeout
+        let current_tick: u32 = cortex_m::peripheral::SYST::get_current();
+        let start_tick: u32 = START_TIME.get(|time: &mut u32| *time);
+        if current_tick.wrapping_sub(start_tick) >= BOOT_TIMEOUT_MS {
+            queue_string("\r\nTimeout reached. Booting application...\r\n");
+            
+            // wait to finish
+            while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+                ensure_transmitting();
+            }
+            
+            boot_application(&p, &mut cp);
+        }
+
         ensure_transmitting();
 
         asm::wfi();
@@ -307,8 +321,13 @@ fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
 
     if !is_app_valid {
         queue_string("\r\nValid application not found!\r\n");
+        
+        while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+            ensure_transmitting();
+        }
+        
         loop {
-            // infinite loop
+            asm::nop();
         }
     }
 
@@ -457,13 +476,24 @@ fn process_input() {
             },
 
             b'\r' | b'\n' => {
-                queue_string("\r\nBooting application...\r\n");
-                LOAD_APPLICATION.store(true, Ordering::SeqCst);
+
+                let is_app_valid: bool = unsafe { *(SLOT_2_VER_ADDR as *const u32) != 0xFFFFFFFF };
+                
+                if !is_app_valid {
+                    queue_string("\r\nValid application not found!\r\n");
+                } else {
+                    queue_string("\r\nBooting application...\r\n");
+                    LOAD_APPLICATION.store(true, Ordering::SeqCst);
+                    
+                    while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+                        ensure_transmitting();
+                    }
+                }
             },
 
             _ => {
                 queue_string("\r\nPress 'U' for updater, 'Enter' for application\r\n");
-            }
+            },
         }
     }
 }
@@ -514,8 +544,7 @@ fn delay(cycles: u32) {
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    
     loop {
-
+        asm::nop();
     }
 }
