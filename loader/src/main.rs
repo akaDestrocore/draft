@@ -456,14 +456,14 @@ fn process_input() {
                 boot_updater(&p, &mut cp)
             },
 
-            b'\r' => {
+            b'\r' | b'\n' => {
                 queue_string("\r\nBooting application...\r\n");
                 LOAD_APPLICATION.store(true, Ordering::SeqCst);
             },
 
             _ => {
                 queue_string("\r\nPress 'U' for updater, 'Enter' for application\r\n");
-            }
+            },
         }
     }
 }
