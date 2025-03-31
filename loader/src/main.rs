@@ -14,7 +14,6 @@ use cortex_m::{
 };
 use cortex_m_rt::{entry, exception};
 use stm32f4::{self as pac, Peripherals, Interrupt};
-use stm32f4::Interrupt::USART2;
 use misc::RingBuffer;
 
 // Constants for memory addresses
@@ -38,7 +37,7 @@ static START_TIME: Mutex<RefCell<u32>> = Mutex::new(RefCell::new(0));
 // Global peripheral pointers using our safe wrapper
 static USART2_PTR: Mutex<RefCell<Option<PeripheralPtr<pac::usart1::RegisterBlock>>>> = 
     Mutex::new(RefCell::new(None));
-static GPIOD_PTR: Mutex<RefCell<Option<PeripheralPtr<pac::gpioa::RegisterBlock>>>> =
+static GPIOD_PTR: Mutex<RefCell<Option<PeripheralPtr<pac::gpioi::RegisterBlock>>>> =
     Mutex::new(RefCell::new(None));
 
 #[entry]
@@ -83,12 +82,12 @@ fn main() -> ! {
     
     // Store peripheral pointers for interrupt handler
     interrupt::free(|cs| {
-        // Store USART2 pointer
-        let usart2_ptr = p.usart2.dr().as_ptr() as *const _;
+        // Store pointer to USART2
+        let usart2_ptr = unsafe { &*(p.usart2.sr().as_ptr() as *const _ as *const pac::usart1::RegisterBlock) };
         USART2_PTR.borrow(cs).replace(Some(PeripheralPtr(usart2_ptr)));
         
-        // Store GPIOD pointer
-        let gpiod_ptr = p.gpiod.bsrr().as_ptr() as *const _;  
+        // Store pointer to GPIOD
+        let gpiod_ptr = unsafe { &*(p.gpiod.bsrr().as_ptr() as *const _ as *const pac::gpioi::RegisterBlock) };
         GPIOD_PTR.borrow(cs).replace(Some(PeripheralPtr(gpiod_ptr)));
     });
     
@@ -520,6 +519,7 @@ fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
     }
 }
 
+// The proper way to define an interrupt handler with cortex-m-rt for USART2
 #[cortex_m_rt::interrupt]
 fn USART2() {
     interrupt::free(|cs| {
@@ -565,7 +565,7 @@ fn panic(_info: &PanicInfo) -> ! {
     interrupt::free(|cs| {
         if let Some(gpiod_ptr) = GPIOD_PTR.borrow(cs).borrow().as_ref() {
             unsafe {
-                let gpiod = &*(gpiod_ptr.0 as *const pac::gpioa::RegisterBlock);
+                let gpiod = &*(gpiod_ptr.0 as *const pac::gpioi::RegisterBlock);
                 
                 // Turn on all LEDs to indicate panic
                 gpiod.bsrr().write(|w| w
