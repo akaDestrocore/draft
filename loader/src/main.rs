@@ -9,10 +9,10 @@ use core::{
 };
 use cortex_m::{
     asm,
-    interrupt::{self, Mutex},
     peripheral::{self, SCB, SYST}
 };
 use cortex_m_rt::{entry, exception};
+use cortex_m_rt::interrupt;
 use stm32f4::{self as pac, Peripherals, Interrupt};
 use misc::RingBuffer;
 
@@ -520,7 +520,7 @@ fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
 }
 
 // The proper way to define an interrupt handler with cortex-m-rt for USART2
-#[cortex_m_rt::interrupt]
+#[interrupt]
 fn USART2() {
     interrupt::free(|cs| {
         if let Some(usart2_ptr) = USART2_PTR.borrow(cs).borrow().as_ref() {
