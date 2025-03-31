@@ -2,179 +2,166 @@
 #![no_main]
 
 use core::{
-    cell::RefCell,
-    panic::PanicInfo,
-    sync::atomic::{AtomicBool, Ordering},
-    marker::PhantomData
+    cell::UnsafeCell, iter::Cycle, panic::PanicInfo, sync::atomic::{AtomicBool, Ordering}
 };
+
 use cortex_m::{
     asm,
     peripheral::{self, SCB, SYST}
 };
+
 use cortex_m_rt::{entry, exception};
-use cortex_m_rt::interrupt;
-use stm32f4::{self as pac, Peripherals, Interrupt};
+use stm32f4::{self as pac, ethernet_ptp::ptpppscr, Peripherals, Usart2};
 use misc::RingBuffer;
 
-// Constants for memory addresses
+pub struct Mutex<T> {
+    inner: UnsafeCell<T>
+}
+
+unsafe impl<T> Sync for Mutex<T> {
+    // access to data is protected by critical sections
+}
+
+impl<T> Mutex<T> {
+    pub const fn new(value: T) -> Self {
+        Self { inner: UnsafeCell::new(value)}
+    }
+
+    pub fn get<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        // always call inside the critical section
+        cortex_m::interrupt::free(|_| {
+            let ptr = self.inner.get();
+            f(unsafe {
+                &mut *ptr
+            })
+        })
+    }
+}
+
 const SLOT_2_APP_ADDR: u32 = 0x08020200;
 const UPDATER_ADDR: u32 = 0x08008000;
 const SLOT_2_VER_ADDR: u32 = 0x08020000;
-const BOOT_TIMEOUT_MS: u32 = 10_000; // 10 seconds
+const BOOT_TIMEOUT_MS: u32 = 10_000; // 10 sec
 
-// Thread-safe peripheral pointer wrapper
+// pointer wrappers
 struct PeripheralPtr<T>(*const T);
 unsafe impl<T> Send for PeripheralPtr<T> {}
 unsafe impl<T> Sync for PeripheralPtr<T> {}
 
-// Global state with proper synchronization
-static TX_BUFFER: Mutex<RefCell<RingBuffer>> = Mutex::new(RefCell::new(RingBuffer::new()));
-static RX_BUFFER: Mutex<RefCell<RingBuffer>> = Mutex::new(RefCell::new(RingBuffer::new()));
+static TX_BUFFER: Mutex<RingBuffer> = Mutex::new(RingBuffer::new());
+static RX_BUFFER: Mutex<RingBuffer> = Mutex::new(RingBuffer::new());
 static TX_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static LOAD_APPLICATION: AtomicBool = AtomicBool::new(false);
-static START_TIME: Mutex<RefCell<u32>> = Mutex::new(RefCell::new(0));
+static START_TIME: Mutex<u32> = Mutex::new(0);
 
-// Global peripheral pointers using our safe wrapper
-static USART2_PTR: Mutex<RefCell<Option<PeripheralPtr<pac::usart1::RegisterBlock>>>> = 
-    Mutex::new(RefCell::new(None));
-static GPIOD_PTR: Mutex<RefCell<Option<PeripheralPtr<pac::gpioi::RegisterBlock>>>> =
-    Mutex::new(RefCell::new(None));
+// handle like logic - using global pointers for periph
+static USART2_PTR: Mutex<Option<PeripheralPtr<pac::usart2::RegisterBlock>>> =
+    Mutex::new(None);
+static GPIOD_PTR: Mutex<Option<PeripheralPtr<pac::gpiod::RegisterBlock>>> =
+    Mutex::new(None);
 
 #[entry]
 fn main() -> ! {
-    // Take ownership of peripherals
+    
     let p = match pac::Peripherals::take() {
         Some(p) => p,
         None => {
-            // This shouldn't happen as we're the first to run, but handle gracefully
-            loop { asm::nop(); }
+            loop {
+                asm::nop();
+            }
         }
     };
     
     let mut cp = match cortex_m::Peripherals::take() {
         Some(cp) => cp,
         None => {
-            // This shouldn't happen as we're the first to run, but handle gracefully
-            loop { asm::nop(); }
+            loop {
+                asm::nop();
+            }
         }
     };
-    
-    // Initialize clocks before anything else
+
+    // clock setup
     setup_system_clock(&p);
-    
-    // Save start time for timeout calculation
-    let sys_tick = cortex_m::peripheral::SYST::get_current();
-    interrupt::free(|cs| {
-        START_TIME.borrow(cs).replace(sys_tick);
-    });
-    
-    // Setup SysTick for millisecond timing
+
+    // get current time
+    let sys_tick: u32 = cortex_m::peripheral::SYST::get_current();
+    START_TIME.get(|time: &mut u32| *time = sys_tick);
+
     setup_systick(&mut cp.SYST);
-    
-    // Initialize GPIO 
+
     setup_gpio(&p);
-    
-    // Initialize USART with interrupts disabled
+
     setup_usart(&p);
-    
-    // Turn on an LED to indicate we're in the loader
-    p.gpiod.bsrr().write(|w| w.bs12().set_bit());
-    
-    // Store peripheral pointers for interrupt handler
-    interrupt::free(|cs| {
-        // Store pointer to USART2
-        let usart2_ptr = unsafe { &*(p.usart2.sr().as_ptr() as *const _ as *const pac::usart1::RegisterBlock) };
-        USART2_PTR.borrow(cs).replace(Some(PeripheralPtr(usart2_ptr)));
-        
-        // Store pointer to GPIOD
-        let gpiod_ptr = unsafe { &*(p.gpiod.bsrr().as_ptr() as *const _ as *const pac::gpioi::RegisterBlock) };
-        GPIOD_PTR.borrow(cs).replace(Some(PeripheralPtr(gpiod_ptr)));
-    });
-    
-    // Send welcome message using polling method first
+
+    let usart2_ptr: &stm32f4::usart2::RegisterBlock = unsafe {
+        &*(p.usart2.sr().as_ptr() as *const _ as *const pac::usart2::RegisterBlock)
+    };
+    USART2_PTR.get(|ptr| *ptr = Some(PeripheralPtr(usart2_ptr)));
+
+    let gpiod_ptr: &stm32f4::gpiod::RegisterBlock = unsafe { 
+        &*(p.gpiod.bsrr().as_ptr() as *const _ as *const pac::gpiod::RegisterBlock)
+    };
+    GPIOD_PTR.get(|ptr| *ptr = Some(PeripheralPtr(gpiod_ptr)));
+
     send_welcome_message_polling(&p);
-    
-    // Now that everything is set up, enable USART2 interrupt
-    unsafe { 
-        cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USART2);
-        
-        // Enable USART2 interrupts
-        p.usart2.cr1().modify(|_, w| w
-            .rxneie().enabled()  // RX interrupt
-        );
-    }
-    
-    // Main loop
+
     loop {
-        // Process any received bytes
-        process_input();
-        
-        // Check timeout
-        if should_boot_application() {
-            boot_application(&p, &mut cp);
-        }
-        
-        // Ensure transmit buffer is being processed
-        ensure_transmitting();
-        
-        // Sleep a bit to save power
-        asm::wfi();
+        asm::nop();
     }
 }
 
 fn setup_system_clock(p: &Peripherals) {
-    // Enable PWR clock
+    // PWR clock
     p.rcc.apb1enr().modify(|_, w| w.pwren().set_bit());
-    
-    // Scale 1 voltage mode
-    p.pwr.cr().modify(|_, w| w.vos().set_bit());
-    
-    // Configure flash latency - required for higher clock speeds
+
+    // Scale 1
+    p.pwr.cr().modify(|_, w| w.vos().scale1());
+
+    // flash latency
     p.flash.acr().modify(|_, w| unsafe {
-        w.latency().bits(5)
-         .prften().set_bit()
-         .icen().set_bit()
-         .dcen().set_bit()
+        w.latency().ws5()
+        .prften().set_bit()
+        .icen().set_bit()
+        .dcen().set_bit()
     });
-    
-    // Enable HSE (external oscillator)
+
+    // Enable HSE
     p.rcc.cr().modify(|_, w| w.hseon().set_bit());
     while p.rcc.cr().read().hserdy().bit_is_clear() {
-        asm::nop();
+        // wait
     }
-    
-    // Configure PLL
+
+    // PLL configuration
     p.rcc.pllcfgr().modify(|_, w| unsafe {
-        w.pllsrc().set_bit() // HSE as source
-         .pllm().bits(4)     // Divide by 4
-         .plln().bits(90)    // Multiply by 90
-         .pllp().div2()      // Divide by 2
-         .pllq().bits(4)     // Divide by 4 for USB
+        w.pllsrc().hse()
+        .pllm().bits(4)
+        .plln().bits(90)
+        .pllp().div2()
+        .pllq().bits(4)
     });
-    
+
     // Enable PLL
     p.rcc.cr().modify(|_, w| w.pllon().set_bit());
     while p.rcc.cr().read().pllrdy().bit_is_clear() {
-        asm::nop();
+        // wait
     }
-    
-    // Set bus dividers
+
+    // bus dividers
     p.rcc.cfgr().modify(|_, w| {
-        w.hpre().div1()    // AHB not divided
-         .ppre1().div4()   // APB1 divided by 4
-         .ppre2().div2()   // APB2 divided by 2
+        w.hpre().div1()
+        .ppre1().div4()
+        .ppre2().div2()
     });
-    
-    // Switch to PLL as clock source
+
+    // PLL as sys clock
     p.rcc.cfgr().modify(|_, w| w.sw().pll());
     while !p.rcc.cfgr().read().sws().is_pll() {
-        asm::nop();
+        // wait
     }
 }
 
 fn setup_systick(syst: &mut SYST) {
-    // Configure SysTick to generate an interrupt every 1ms
-    // Clock is 180 MHz, so we need 180,000 cycles per ms
     syst.set_reload(180_000 - 1);
     syst.clear_current();
     syst.enable_counter();
@@ -182,29 +169,26 @@ fn setup_systick(syst: &mut SYST) {
 }
 
 fn setup_gpio(p: &Peripherals) {
-    // Enable GPIO clocks
     p.rcc.ahb1enr().modify(|_, w| {
-        w.gpioaen().set_bit()  // USART2 pins are on GPIOA
-         .gpioden().set_bit()  // LED pins are on GPIOD
+        w.gpioaen().enabled()
+        .gpioden().enabled()
     });
-    
-    // Configure USART2 pins (PA2=TX, PA3=RX)
+
     p.gpioa.moder().modify(|_, w| {
-        w.moder2().alternate()  // PA2 as alternate function
-         .moder3().alternate()  // PA3 as alternate function
+        w.moder2().alternate()
+        .moder3().alternate()
     });
-    
+
     p.gpioa.ospeedr().modify(|_, w| {
         w.ospeedr2().high_speed()
          .ospeedr3().high_speed()
     });
     
     p.gpioa.afrl().modify(|_, w| {
-        w.afrl2().af7()  // AF7 = USART2_TX
-         .afrl3().af7()  // AF7 = USART2_RX
+        w.afrl2().af7()
+         .afrl3().af7()
     });
-    
-    // Configure LED pins (PD12-PD15)
+
     p.gpiod.moder().modify(|_, w| {
         w.moder12().output()
          .moder13().output()
@@ -230,108 +214,51 @@ fn setup_gpio(p: &Peripherals) {
 fn setup_usart(p: &Peripherals) {
     // Enable USART2 clock
     p.rcc.apb1enr().modify(|_, w| w.usart2en().set_bit());
-    
-    // Configure USART2 (115200 baud, 8N1)
-    // Assuming 90 MHz APB1 clock / 4 = 22.5 MHz
-    // 22,500,000 / 115,200 = 195.3125
-    // Mantissa = 195 = 0xC3, Fraction = 0.3125*16 = 5 = 0x5
-    p.usart2.brr().write(|w| unsafe { 
-        w.div_mantissa().bits(195)
-         .div_fraction().bits(5)
+
+    p.usart2.brr().write(|w| unsafe {
+        w.div_mantissa().bits(0xc3)
+        .div_fraction().bits(0x5)
     });
-    
-    // Enable USART, TX, and RX (but not interrupts yet)
+
+    // enable error interrupts
     p.usart2.cr1().write(|w| {
         w.ue().enabled()
-         .te().enabled()
-         .re().enabled()
+        .te().enabled()
+        .re().enabled()
     });
 }
 
 fn send_welcome_message_polling(p: &Peripherals) {
-    let message = "\r\n==== STM32F4 Bootloader ====\r\n\
+    let message: &str = "\r\n==== STM32F4 Bootloader ====\r\n\
                    Press 'U' to enter updater\r\n\
                    Press 'Enter' to boot application\r\n\
                    Will boot automatically in 10 seconds...\r\n";
     
     for byte in message.bytes() {
-        // Wait for transmit register to be empty
         while p.usart2.sr().read().txe().bit_is_clear() {
-            asm::nop();
+            // wait TX empty
         }
         
-        // Send the byte
+        // send byte
         p.usart2.dr().write(|w| unsafe { w.bits(byte as u16) });
     }
     
-    // Wait for transmission to complete
     while p.usart2.sr().read().tc().bit_is_clear() {
-        asm::nop();
+        // wait TC
     }
 }
 
-fn process_input() {
-    interrupt::free(|cs| {
-        if let Some(byte) = RX_BUFFER.borrow(cs).borrow_mut().read() {
-            match byte {
-                b'U' | b'u' => {
-                    // Queue message about booting to updater
-                    queue_string("\r\nBooting to updater...\r\n");
-                    
-                    // Boot to updater after message is sent
-                    LOAD_APPLICATION.store(false, Ordering::SeqCst);
-                    
-                    // Ensure the message is transmitted before jumping
-                    while TX_IN_PROGRESS.load(Ordering::SeqCst) {
-                        ensure_transmitting();
-                    }
-                    
-                    // Now boot to updater
-                    let p = pac::Peripherals::take().unwrap();
-                    let mut cp = unsafe { cortex_m::Peripherals::steal() };
-                    boot_updater(&p, &mut cp);
-                },
-                
-                b'\r' => {
-                    // Queue message about booting the application
-                    queue_string("\r\nBooting application...\r\n");
-                    LOAD_APPLICATION.store(true, Ordering::SeqCst);
-                },
-                
-                _ => {
-                    // Any other key, show the options
-                    queue_string("\r\nPress 'U' for updater, 'Enter' for application\r\n");
-                }
-            }
-        }
-    });
-}
-
-fn queue_string(s: &str) {
-    interrupt::free(|cs| {
-        let mut tx_buffer = TX_BUFFER.borrow(cs).borrow_mut();
-        for byte in s.bytes() {
-            tx_buffer.write(byte);
-        }
-    });
-    
-    ensure_transmitting();
-}
-
 fn ensure_transmitting() {
-    // If transmission is not in progress, start it
     if !TX_IN_PROGRESS.load(Ordering::SeqCst) {
-        // Check if there's data to transmit
-        let byte = interrupt::free(|cs| TX_BUFFER.borrow(cs).borrow_mut().read());
-        
-        if let Some(byte) = byte {
-            interrupt::free(|cs| {
-                if let Some(usart2_ptr) = USART2_PTR.borrow(cs).borrow().as_ref() {
+        // Check if there is any data that can be transferred
+        if let Some(byte) = TX_BUFFER.get(|buf| buf.read()) {
+            USART2_PTR.get(|usart_opt| {
+                if let Some(ref usart_ptr) = *usart_opt {
                     unsafe {
-                        // Get USART2 register block
-                        let usart2 = &*(usart2_ptr.0 as *const pac::usart1::RegisterBlock);
+                        // get USART2
+                        let usart2 = &*(usart_ptr.0 as *const pac::usart1::RegisterBlock);
                         
-                        // Write to DR (will clear TXE)
+                        // Write to DR will fix TXE
                         usart2.dr().write(|w| w.bits(byte as u16));
                         
                         // Enable TXE interrupt
@@ -345,247 +272,204 @@ fn ensure_transmitting() {
     }
 }
 
-fn should_boot_application() -> bool {
-    // Check if user requested boot
-    if LOAD_APPLICATION.load(Ordering::SeqCst) {
-        return true;
-    }
+fn queue_string(s: &str) {
+    TX_BUFFER.get(|buf: &mut RingBuffer| {
+        for byte in s.bytes() {
+            buf.write(byte);
+        }
+    });
     
-    // Check timeout
-    interrupt::free(|cs| {
-        let start = *START_TIME.borrow(cs).borrow();
-        let now = cortex_m::peripheral::SYST::get_current();
-        let elapsed = now.wrapping_sub(start);
-        
-        elapsed >= BOOT_TIMEOUT_MS
-    })
+    ensure_transmitting();
 }
 
 fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
-    // Check if application is valid
-    let app_valid = unsafe { *(SLOT_2_VER_ADDR as *const u32) != 0xFFFFFFFF };
-    
-    if !app_valid {
-        queue_string("\r\nNo valid application found!\r\n");
+    let is_app_valid: bool = unsafe {
+        *(SLOT_2_VER_ADDR as *const u32) != 0xFFFFFFFF
+    };
+
+    if !is_app_valid {
+        queue_string("\r\nValid application not found!\r\n");
         loop {
-            asm::nop();
+            // infinite loop
         }
     }
-    
-    // Get reset and stack values from the application
-    let reset_addr = SLOT_2_APP_ADDR + 4;
-    let reset_vector = unsafe { *(reset_addr as *const u32) };
-    let stack_addr = unsafe { *(SLOT_2_APP_ADDR as *const u32) };
-    
-    // Reset and disable peripherals
+
+    // get SP and reset handler addreses
+    let reset_addr: u32 = SLOT_2_APP_ADDR + 4;
+    let reset_vector: u32 = unsafe {
+        *(reset_addr as *const u32)
+    };
+    let stack_addr: u32 = unsafe {
+        *(SLOT_2_APP_ADDR as *const u32)
+    };
+
+    // reset everything
     p.rcc.cfgr().reset();
     p.rcc.cr().modify(|_, w| w
         .hsion().set_bit()
         .hseon().clear_bit()
-        .pllon().clear_bit()
+        .pllon().clear_bit()  
     );
-    
-    // Wait for HSI to be ready
     while p.rcc.cr().read().hsirdy().bit_is_clear() {
-        asm::nop();
+        // wait
     }
-    
-    // Wait for switch to HSI
+
     while !p.rcc.cfgr().read().sws().is_hsi() {
-        asm::nop();
+        // wait
     }
-    
-    // Disable all peripheral clocks
+
+    // disable all clocks
     p.rcc.ahb1enr().reset();
     p.rcc.apb1enr().reset();
     p.rcc.apb2enr().reset();
-    
-    // Enable SYSCFG for memory remap
+
+    // do the remap
     p.rcc.apb2enr().modify(|_, w| w.syscfgen().set_bit());
-    
-    // Memory remap
-    p.syscfg.memrmp().write(|w| unsafe { w.bits(0x01) });
-    
-    // Disable all interrupts
+    p.syscfg.memrmp().write(|w| unsafe {
+        w.bits(0x01)
+    });
+
+    // disable interrupts
     cortex_m::interrupt::disable();
-    
-    // Disable SysTick
+
+    // disable SysTick
     cp.SYST.disable_counter();
     cp.SYST.disable_interrupt();
-    
-    // Reset any pending interrupts
+
+    // disable all pending interrupts
     unsafe {
-        let scb = SCB::ptr();
-        
-        // Clear PendSV
-        let icsr = (*scb).icsr.read();
+        let scb: *const peripheral::scb::RegisterBlock = SCB::ptr();
+
+        let icsr: u32 = (*scb).icsr.read();
         (*scb).icsr.write(icsr | (1 << 25));
-        
-        // Disable fault handlers
+
         (*scb).shcsr.modify(|v| v & !(
-            (1 << 18) | // USGFAULTENA
-            (1 << 17) | // BUSFAULTENA 
-            (1 << 16)   // MEMFAULTENA
+            (1 << 18) | (1 << 17) | (1 << 16)
         ));
-        
-        // Set the vector table offset
+
         (*scb).vtor.write(SLOT_2_APP_ADDR);
-        
-        // Set the stack pointer
+
+        // change SP
         core::arch::asm!("MSR msp, {0}", in(reg) stack_addr);
-        
-        // Jump to the application
+
         let jump_fn: extern "C" fn() -> ! = core::mem::transmute(reset_vector);
         jump_fn();
-    }
-    
-    // Should never get here
-    loop {
-        asm::nop();
     }
 }
 
 fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
-    // Get reset and stack values from the updater
-    let reset_addr = UPDATER_ADDR + 4;
-    let reset_vector = unsafe { *(reset_addr as *const u32) };
-    let stack_addr = unsafe { *(UPDATER_ADDR as *const u32) };
-    
-    // Reset and disable peripherals
+
+    // get SP and reset handler addreses
+    let reset_addr: u32 = UPDATER_ADDR + 4;
+    let reset_vector: u32 = unsafe {
+        *(reset_addr as *const u32)
+    };
+    let stack_addr: u32 = unsafe {
+        *(UPDATER_ADDR as *const u32)
+    };
+
+    // reset everything
     p.rcc.cfgr().reset();
     p.rcc.cr().modify(|_, w| w
         .hsion().set_bit()
         .hseon().clear_bit()
-        .pllon().clear_bit()
+        .pllon().clear_bit()  
     );
-    
-    // Wait for HSI to be ready
     while p.rcc.cr().read().hsirdy().bit_is_clear() {
-        asm::nop();
+        // wait
     }
-    
-    // Wait for switch to HSI
+
     while !p.rcc.cfgr().read().sws().is_hsi() {
-        asm::nop();
+        // wait
     }
-    
-    // Disable all peripheral clocks
+
+    // disable all clocks
     p.rcc.ahb1enr().reset();
     p.rcc.apb1enr().reset();
     p.rcc.apb2enr().reset();
-    
-    // Enable SYSCFG for memory remap
+
+    // do the remap
     p.rcc.apb2enr().modify(|_, w| w.syscfgen().set_bit());
-    
-    // Memory remap
-    p.syscfg.memrmp().write(|w| unsafe { w.bits(0x01) });
-    
-    // Disable all interrupts
+    p.syscfg.memrmp().write(|w| unsafe {
+        w.bits(0x01)
+    });
+
+    // disable interrupts
     cortex_m::interrupt::disable();
-    
-    // Disable SysTick
+
+    // disable SysTick
     cp.SYST.disable_counter();
     cp.SYST.disable_interrupt();
-    
-    // Reset any pending interrupts
+
+    // disable all pending interrupts
     unsafe {
-        let scb = SCB::ptr();
-        
-        // Clear PendSV
-        let icsr = (*scb).icsr.read();
+        let scb: *const peripheral::scb::RegisterBlock = SCB::ptr();
+
+        let icsr: u32 = (*scb).icsr.read();
         (*scb).icsr.write(icsr | (1 << 25));
-        
-        // Disable fault handlers
+
         (*scb).shcsr.modify(|v| v & !(
-            (1 << 18) | // USGFAULTENA
-            (1 << 17) | // BUSFAULTENA 
-            (1 << 16)   // MEMFAULTENA
+            (1 << 18) | (1 << 17) | (1 << 16)
         ));
-        
-        // Set the vector table offset
+
         (*scb).vtor.write(UPDATER_ADDR);
-        
-        // Set the stack pointer
+
+        // change SP
         core::arch::asm!("MSR msp, {0}", in(reg) stack_addr);
-        
-        // Jump to the updater
+
         let jump_fn: extern "C" fn() -> ! = core::mem::transmute(reset_vector);
         jump_fn();
     }
-    
-    // Should never get here
-    loop {
-        asm::nop();
-    }
 }
 
-// The proper way to define an interrupt handler with cortex-m-rt for USART2
-#[interrupt]
-fn USART2() {
-    interrupt::free(|cs| {
-        if let Some(usart2_ptr) = USART2_PTR.borrow(cs).borrow().as_ref() {
+#[no_mangle]
+pub extern "C" fn USART2() {
+    USART2_PTR.get(|usart_opt| {
+        if let Some(ref usart_ptr) = *usart_opt {
             unsafe {
-                let usart2 = &*(usart2_ptr.0 as *const pac::usart1::RegisterBlock);
-                
-                // Check for receive
+                let usart2 = &*(usart_ptr.0 as *const pac::usart2::RegisterBlock);
+
+                // check data in RX buffer
                 if usart2.sr().read().rxne().bit_is_set() {
                     let data = usart2.dr().read().bits() as u8;
-                    RX_BUFFER.borrow(cs).borrow_mut().write(data);
+                    RX_BUFFER.get(|buf| {buf.write(data);
+                    });
                 }
-                
-                // Check for transmit
+
+                // check if we can TX
                 if usart2.sr().read().txe().bit_is_set() && usart2.cr1().read().txeie().bit_is_set() {
-                    // Mark TX as not in progress
                     TX_IN_PROGRESS.store(false, Ordering::SeqCst);
-                    
-                    // Check if there's more data to send
-                    if let Some(byte) = TX_BUFFER.borrow(cs).borrow_mut().read() {
-                        // Send next byte
-                        usart2.dr().write(|w| unsafe { w.bits(byte as u16) });
+
+                    if let Some(byte) = TX_BUFFER.get(|buf| buf.read()) {
+                        usart2.dr().write(|w| unsafe {
+                            w.bits(byte as u16)
+                        });
                         TX_IN_PROGRESS.store(true, Ordering::SeqCst);
                     } else {
-                        // No more data, disable TXE interrupt
+                        // disable TXE because no data left
                         usart2.cr1().modify(|_, w| w.txeie().disabled());
                     }
                 }
             }
         }
-    });
+    })
 }
 
 #[exception]
 fn SysTick() {
-    // This handler is used for timekeeping
-    // Nothing to do here as we just use the counter value
-}
-
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    // Flash LEDs in a panic pattern
-    interrupt::free(|cs| {
-        if let Some(gpiod_ptr) = GPIOD_PTR.borrow(cs).borrow().as_ref() {
-            unsafe {
-                let gpiod = &*(gpiod_ptr.0 as *const pac::gpioi::RegisterBlock);
-                
-                // Turn on all LEDs to indicate panic
-                gpiod.bsrr().write(|w| w
-                    .bs12().set_bit()
-                    .bs13().set_bit()
-                    .bs14().set_bit()
-                    .bs15().set_bit()
-                );
-            }
-        }
-    });
-    
-    loop {
-        // Toggle LED pattern
-        delay(500_000);
-    }
+    // counter for time
 }
 
 fn delay(cycles: u32) {
     for _ in 0..cycles {
         asm::nop();
+    }
+}
+
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    
+    loop {
+
     }
 }
