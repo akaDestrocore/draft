@@ -30,7 +30,7 @@ impl<T> Mutex<T> {
     pub fn get<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
         // always call inside the critical section
         cortex_m::interrupt::free(|_| {
-            let ptr = self.inner.get();
+            let ptr: *mut T = self.inner.get();
             f(unsafe {
                 &mut *ptr
             })
@@ -66,7 +66,7 @@ static GPIOD_PTR: Mutex<Option<PeripheralPtr<pac::gpiod::RegisterBlock>>> =
 #[entry]
 fn main() -> ! {
     
-    let p = match pac::Peripherals::take() {
+    let p: Peripherals = match pac::Peripherals::take() {
         Some(p) => p,
         None => {
             loop {
@@ -75,7 +75,7 @@ fn main() -> ! {
         }
     };
     
-    let mut cp = match cortex_m::Peripherals::take() {
+    let mut cp: cortex_m::Peripherals = match cortex_m::Peripherals::take() {
         Some(cp) => cp,
         None => {
             loop {
@@ -88,7 +88,7 @@ fn main() -> ! {
     setup_system_clock(&p);
 
     // get current time
-    let current_ms = TICK_MS.load(Ordering::Relaxed);
+    let current_ms: u32 = TICK_MS.load(Ordering::Relaxed);
     START_TIME.get(|time: &mut u32| *time = current_ms);
 
     setup_systick(&mut cp.SYST);
@@ -197,7 +197,8 @@ fn setup_system_clock(p: &Peripherals) {
 }
 
 fn setup_systick(syst: &mut SYST) {
-    syst.set_reload(180_000 - 1);
+    syst.set_clock_source(cortex_m::peripheral::syst::SystClkSource::Core);
+    syst.set_reload(90_000  - 1);
     syst.clear_current();
     syst.enable_counter();
     syst.enable_interrupt();
@@ -264,8 +265,25 @@ fn setup_usart(p: &Peripherals) {
 }
 
 fn send_welcome_message_polling(p: &Peripherals) {
-    let message: &str = "\r\n==== STM32F4 Bootloader ====\r\n\
-                   Press 'U' to enter updater\r\n\
+    let message: &str = "\r\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r
+xxxxxxxx  xxxxxxxxxxxxxxxxxxxx  xxxxxxxxx\r
+xxxxxxxxxx  xxxxxxxxxxxxxxxxx  xxxxxxxxxx\r
+xxxxxx  xxx  xxxxxxxxxxxxxxx  xx   xxxxxx\r
+xxxxxxxx  xx  xxxxxxxxxxxxx  xx  xxxxxxxx\r
+xxxx  xxx   xxxxxxxxxxxxxxxxx  xxx  xxxxx\r
+xxxxxx    xxxx  xxxxxxxx  xxx     xxxxxxx\r
+xxxxxxxx xxxxx xx      xx xxxx  xxxxxxxxx\r
+xxxx     xxxxx   xx  xx   xxxxx     xxxxx\r
+xxxxxxxx xxxxxxxxxx  xxxxxxxxxx  xxxxxxxx\r
+xxxxx    xxxxxx  xx  xx  xxxxxx    xxxxxx\r
+xxxxxxxx  xxxx xxxx  xxxx xxxxx xxxxxxxxx\r
+xxxxxxx    xxx  xxx  xxx  xxx    xxxxxxxx\r
+xxxxxxxxxx   xxxxxx  xxxxxx   xxxxxxxxxxx\r
+xxxxxxxxxxxxxx             xxxxxxxxxxxxxx\r
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r
+                   \r\n\r\nPress 'U' to enter updater\r\n\
                    Press 'Enter' to boot application\r\n\
                    Will boot automatically in 10 seconds...\r\n";
     
@@ -291,7 +309,7 @@ fn ensure_transmitting() {
                 if let Some(ref usart_ptr) = *usart_opt {
                     unsafe {
                         // get USART2
-                        let usart2 = &*(usart_ptr.0 as *const pac::usart1::RegisterBlock);
+                        let usart2: &stm32f4::usart1::RegisterBlock = &*(usart_ptr.0 as *const pac::usart1::RegisterBlock);
                         
                         // Write to DR will fix TXE
                         usart2.dr().write(|w| w.bits(byte as u16));
@@ -383,7 +401,7 @@ fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
         let icsr: u32 = (*scb).icsr.read();
         (*scb).icsr.write(icsr | (1 << 25));
 
-        (*scb).shcsr.modify(|v| v & !(
+        (*scb).shcsr.modify(|v: u32| v & !(
             (1 << 18) | (1 << 17) | (1 << 16)
         ));
 
@@ -448,7 +466,7 @@ fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
         let icsr: u32 = (*scb).icsr.read();
         (*scb).icsr.write(icsr | (1 << 25));
 
-        (*scb).shcsr.modify(|v| v & !(
+        (*scb).shcsr.modify(|v: u32| v & !(
             (1 << 18) | (1 << 17) | (1 << 16)
         ));
 
@@ -463,7 +481,7 @@ fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
 }
 
 fn process_input() {
-    if let Some(byte) = RX_BUFFER.get(|buf| buf.read()) {
+    if let Some(byte) = RX_BUFFER.get(|buf: &mut RingBuffer| buf.read()) {
         match byte {
             b'U' | b'u' => {
                 queue_string("\r\nBooting to updater...\r\n");
@@ -474,7 +492,7 @@ fn process_input() {
                 }
 
                 let p: Peripherals = unsafe {pac::Peripherals::steal()};
-                let mut cp = unsafe {cortex_m::Peripherals::steal()};
+                let mut cp: cortex_m::Peripherals = unsafe {cortex_m::Peripherals::steal()};
                 boot_updater(&p, &mut cp)
             },
 
@@ -503,7 +521,7 @@ fn process_input() {
 
 #[no_mangle]
 pub extern "C" fn USART2() {
-    USART2_PTR.get(|usart_opt| {
+    USART2_PTR.get(|usart_opt: &mut Option<PeripheralPtr<stm32f4::usart1::RegisterBlock>>| {
         if let Some(ref usart_ptr) = *usart_opt {
             unsafe {
                 let usart2 = &*(usart_ptr.0 as *const pac::usart2::RegisterBlock);
@@ -511,7 +529,7 @@ pub extern "C" fn USART2() {
                 // check data in RX buffer
                 if usart2.sr().read().rxne().bit_is_set() {
                     let data = usart2.dr().read().bits() as u8;
-                    RX_BUFFER.get(|buf| {buf.write(data);
+                    RX_BUFFER.get(|buf: &mut RingBuffer| {buf.write(data);
                     });
                 }
 
@@ -538,12 +556,6 @@ pub extern "C" fn USART2() {
 fn SysTick() {
     let current: u32 = TICK_MS.load(Ordering::Relaxed);
     TICK_MS.store(current + 1, Ordering::Relaxed);
-}
-
-fn delay(cycles: u32) {
-    for _ in 0..cycles {
-        asm::nop();
-    }
 }
 
 #[panic_handler]
