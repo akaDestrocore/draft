@@ -423,6 +423,7 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "heapless",
+ "misc",
  "panic-halt",
  "stm32f4",
 ]
