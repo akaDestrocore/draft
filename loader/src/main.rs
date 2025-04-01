@@ -266,8 +266,6 @@ fn setup_usart(p: &Peripherals) {
 
 fn send_welcome_message_polling(p: &Peripherals) {
     let message: &str = "\r\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r
-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r
-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r
 xxxxxxxx  xxxxxxxxxxxxxxxxxxxx  xxxxxxxxx\r
 xxxxxxxxxx  xxxxxxxxxxxxxxxxx  xxxxxxxxxx\r
 xxxxxx  xxx  xxxxxxxxxxxxxxx  xx   xxxxxx\r
@@ -352,49 +350,99 @@ fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
         }
     }
 
-    // get SP and reset handler addreses
     let reset_addr: u32 = SLOT_2_APP_ADDR + 4;
-    let reset_vector: u32 = unsafe {
-        *(reset_addr as *const u32)
-    };
     let stack_addr: u32 = unsafe {
         *(SLOT_2_APP_ADDR as *const u32)
     };
+    let reset_vector: u32 = unsafe {
+        *(reset_addr as *const u32)
+    };
 
-    // reset everything
-    p.rcc.cfgr().reset();
-    p.rcc.cr().modify(|_, w| w
-        .hsion().set_bit()
-        .hseon().clear_bit()
-        .pllon().clear_bit()  
-    );
+    // Reset clock
+    p.rcc.cr().modify(|_, w| w.hsion().set_bit());
     while p.rcc.cr().read().hsirdy().bit_is_clear() {
         // wait
     }
 
+    // Set HSITRIM[4:0] bits to the reset value
+    p.rcc.cr().modify(|_, w| unsafe {
+        w.hsitrim().bits(0x10)
+    });
+
+    p.rcc.cfgr().reset();
     while !p.rcc.cfgr().read().sws().is_hsi() {
         // wait
     }
 
-    // disable all clocks
-    p.rcc.ahb1enr().reset();
-    p.rcc.apb1enr().reset();
-    p.rcc.apb2enr().reset();
+    p.rcc.cr().modify(|_, w| w
+        .hseon().clear_bit()
+        .hsebyp().clear_bit()
+        .csson().clear_bit()
+    );
+    while p.rcc.cr().read().hserdy().bit_is_set() {
+        // wait
+    }
 
-    // do the remap
+    //reset PLL
+    p.rcc.cr().modify(|_, w| w.pllon().clear_bit());
+    while p.rcc.cr().read().pllrdy().bit_is_set() {
+        // wait
+    }
+
+    // reset PLL configuration
+    p.rcc.pllcfgr().modify(|_, w| unsafe {
+        w.pllm().bits(0x10)
+        .plln().bits(0x040)
+        .pllp().bits(0x080)
+        .pllq().bits(0x4)
+    });
+
+    // disable all interrupts
+    p.rcc.cir().modify(|_, w| w
+        .lsirdyie().clear_bit()
+        .lserdyie().clear_bit()
+        .hsirdyie().clear_bit()
+        .pllrdyie().clear_bit()
+    );
+    p.rcc.cir().modify(|_, w| w
+        .lsirdyc().clear_bit()
+        .lserdyc().clear_bit()
+        .hsirdyc().clear_bit()
+        .pllrdyc().clear_bit()
+    );
+
+    // reset all CSR flags
+    p.rcc.csr().modify(|_, w| w.rmvf().set_bit());
+
+    // force reset for all peripherals
+    p.rcc.apb1rstr().write(|w| unsafe { w.bits(0xF6FEC9FF) });
+    p.rcc.apb1rstr().write(|w| unsafe { w.bits(0x0) });
+
+    p.rcc.apb2rstr().write(|w| unsafe { w.bits(0x04777933) });
+    p.rcc.apb2rstr().write(|w| unsafe { w.bits(0x0) });
+
+    p.rcc.ahb1rstr().write(|w| unsafe { w.bits(0x226011FF) });
+    p.rcc.ahb1rstr().write(|w| unsafe { w.bits(0x0) });
+
+    p.rcc.ahb2rstr().write(|w| unsafe { w.bits(0x000000C1) });
+    p.rcc.ahb2rstr().write(|w| unsafe { w.bits(0x0) });
+
+    p.rcc.ahb3rstr().write(|w| unsafe { w.bits(0x00000001) });
+    p.rcc.ahb3rstr().write(|w| unsafe { w.bits(0x0) });
+
+    // remap
     p.rcc.apb2enr().modify(|_, w| w.syscfgen().set_bit());
     p.syscfg.memrmp().write(|w| unsafe {
         w.bits(0x01)
     });
 
-    // disable interrupts
-    cortex_m::interrupt::disable();
-
     // disable SysTick
+    let mut cp: cortex_m::Peripherals = unsafe {
+        cortex_m::Peripherals::steal()
+    };
     cp.SYST.disable_counter();
     cp.SYST.disable_interrupt();
 
-    // disable all pending interrupts
     unsafe {
         let scb: *const peripheral::scb::RegisterBlock = SCB::ptr();
 
@@ -417,45 +465,89 @@ fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
 
 fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
 
-    // get SP and reset handler addreses
     let reset_addr: u32 = UPDATER_ADDR + 4;
-    let reset_vector: u32 = unsafe {
-        *(reset_addr as *const u32)
-    };
     let stack_addr: u32 = unsafe {
         *(UPDATER_ADDR as *const u32)
     };
+    let reset_vector: u32 = unsafe {
+        *(reset_addr as *const u32)
+    };
 
-    // reset everything
-    p.rcc.cfgr().reset();
-    p.rcc.cr().modify(|_, w| w
-        .hsion().set_bit()
-        .hseon().clear_bit()
-        .pllon().clear_bit()  
-    );
+    p.rcc.cr().modify(|_, w| w.hsion().set_bit());
     while p.rcc.cr().read().hsirdy().bit_is_clear() {
         // wait
     }
 
+    // set hsitrim to reset value
+    p.rcc.cr().modify(|_, w| unsafe {
+        w.hsitrim().bits(0x10)
+    });
+
+    p.rcc.cfgr().reset();
     while !p.rcc.cfgr().read().sws().is_hsi() {
-        // wait
+        asm::nop();
     }
 
-    // disable all clocks
-    p.rcc.ahb1enr().reset();
-    p.rcc.apb1enr().reset();
-    p.rcc.apb2enr().reset();
+    p.rcc.cr().modify(|_, w| w
+        .hseon().clear_bit()
+        .hsebyp().clear_bit()
+        .csson().clear_bit()
+    );
+    while p.rcc.cr().read().hserdy().bit_is_set() {
+        asm::nop();
+    }
 
-    // do the remap
+    // reset PLL configuration
+    p.rcc.pllcfgr().modify(|_, w| unsafe {
+        w.pllm().bits(0x10)
+        .plln().bits(0x040)
+        .pllp().bits(0x080)
+        .pllq().bits(0x4)
+    });
+
+    // disable all interrupts
+    p.rcc.cir().modify(|_, w| w
+        .lsirdyie().clear_bit()
+        .lserdyie().clear_bit()
+        .hsirdyie().clear_bit()
+        .pllrdyie().clear_bit()
+    );
+    p.rcc.cir().modify(|_, w| w
+        .lsirdyc().clear_bit()
+        .lserdyc().clear_bit()
+        .hsirdyc().clear_bit()
+        .pllrdyc().clear_bit()
+    );
+
+    // reset all CSR flags
+    p.rcc.csr().modify(|_, w| w.rmvf().set_bit());
+
+    // force reset for all peripherals
+    p.rcc.apb1rstr().write(|w| unsafe { w.bits(0xF6FEC9FF) });
+    p.rcc.apb1rstr().write(|w| unsafe { w.bits(0x0) });
+
+    p.rcc.apb2rstr().write(|w| unsafe { w.bits(0x04777933) });
+    p.rcc.apb2rstr().write(|w| unsafe { w.bits(0x0) });
+
+    p.rcc.ahb1rstr().write(|w| unsafe { w.bits(0x226011FF) });
+    p.rcc.ahb1rstr().write(|w| unsafe { w.bits(0x0) });
+
+    p.rcc.ahb2rstr().write(|w| unsafe { w.bits(0x000000C1) });
+    p.rcc.ahb2rstr().write(|w| unsafe { w.bits(0x0) });
+
+    p.rcc.ahb3rstr().write(|w| unsafe { w.bits(0x00000001) });
+    p.rcc.ahb3rstr().write(|w| unsafe { w.bits(0x0) });
+
+    // remap
     p.rcc.apb2enr().modify(|_, w| w.syscfgen().set_bit());
     p.syscfg.memrmp().write(|w| unsafe {
         w.bits(0x01)
     });
 
-    // disable interrupts
-    cortex_m::interrupt::disable();
-
     // disable SysTick
+    let mut cp: cortex_m::Peripherals = unsafe {
+        cortex_m::Peripherals::steal()
+    };
     cp.SYST.disable_counter();
     cp.SYST.disable_interrupt();
 

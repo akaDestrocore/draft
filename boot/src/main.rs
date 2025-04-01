@@ -22,9 +22,9 @@ fn main() -> ! {
         prepare_for_jump(&p);
 
         if loader_is_valid {
-            jump_to_image(LOADER_ADDR);
+            boot_to_image(LOADER_ADDR);
         } else {
-            jump_to_image(UPDATER_ADDR);
+            boot_to_image(UPDATER_ADDR);
         }
     }
 
@@ -171,7 +171,7 @@ fn prepare_for_jump(p: &Peripherals) {
 
 }
 
-fn jump_to_image(addr: u32) -> ! {
+fn boot_to_image(addr: u32) -> ! {
     let reset_addr: u32 = addr + 4;
     let stack_addr: u32 = unsafe {
         *(addr as *const u32)
