@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-changed=memory.x");
-    println!("cargo:rerun-if-changed=link.x");
+    println!("cargo:rerun-if-changed=custom.x");
     
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
     
@@ -15,10 +15,10 @@ fn main() {
         .write_all(include_bytes!("memory.x"))
         .unwrap();
         
-    // Create link.x in the output directory
-    File::create(out.join("link.x"))
+    // Create custom.x for our additional sections
+    File::create(out.join("custom.x"))
         .unwrap()
-        .write_all(include_bytes!("link.x"))
+        .write_all(include_bytes!("custom.x"))
         .unwrap();
     
     println!("cargo:rustc-link-search={}", out.display());

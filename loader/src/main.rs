@@ -665,6 +665,20 @@ fn SysTick() {
     TICK_MS.store(current + 1, Ordering::Relaxed);
 }
 
+#[exception]
+fn HardFault(info: &cortex_m_rt::ExceptionFrame) -> ! {
+    loop {
+        asm::nop();
+    }
+}
+
+#[exception]
+fn DefaultHandler(irqn: i16) {
+    loop {
+        asm::nop();
+    }
+}
+
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {
