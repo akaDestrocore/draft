@@ -8,11 +8,13 @@ use crate::image::{
     IMAGE_TYPE_LOADER, IMAGE_TYPE_UPDATER, IMAGE_TYPE_APP
 };
 
+// Исправленные импорты
 use aes_gcm::{
     aead::{AeadInPlace, KeyInit},
-    AesGcm, Aes128, Key, Nonce, Tag,
-    consts::U12,
+    AesGcm, Key, Nonce, Tag,
 };
+use aes::cipher::consts::U12;
+use aes::Aes128;
 
 use crate::vec::Vec;
 
@@ -106,7 +108,7 @@ pub trait CryptoOperations {
 
 /// AES-GCM Crypto implementation
 pub struct AesGcmCrypto {
-    cipher: Option<Aes128Gcm>,
+    cipher: Option<AesGcm<Aes128, U12>>,
     buffer: Vec<u8, BUFFER_SIZE>,
     nonce: [u8; NONCE_SIZE],
     tag: [u8; AUTH_TAG_SIZE],
@@ -130,8 +132,8 @@ impl AesGcmCrypto {
 impl CryptoOperations for AesGcmCrypto {
     fn init_decryption(&mut self, key: &[u8], nonce: &[u8], header: &[u8]) -> Result<(), XmodemError> {
         // Create a new cipher instance
-        let key = Key::<Aes128Gcm>::from_slice(key);
-        self.cipher = Some(Aes128Gcm::new(key));
+        let key = Key::<AesGcm<Aes128, U12>>::from_slice(key);
+        self.cipher = Some(AesGcm::<Aes128, U12>::new(key));
         
         // Copy the nonce
         self.nonce.copy_from_slice(nonce);
@@ -167,16 +169,15 @@ impl CryptoOperations for AesGcmCrypto {
         // If we have enough data to fill the output buffer, decrypt it
         let bytes_to_decrypt = cmp::min(self.buffer.len(), output.len());
         if bytes_to_decrypt > 0 {
-            let nonce = Nonce::<Aes128Gcm>::from_slice(&self.nonce);
+            let nonce = Nonce::<U12>::from_slice(&self.nonce);
             
             // Prepare a copy of the data to decrypt
             let mut to_decrypt = [0u8; PACKET_1K_SIZE];
             to_decrypt[..bytes_to_decrypt].copy_from_slice(&self.buffer.as_ref()[..bytes_to_decrypt]);
             
             // Decrypt in-place
-            let aad = [];
-            let payload = Payload { msg: &mut to_decrypt[..bytes_to_decrypt], aad: &aad };
-            if let Err(_) = self.cipher.as_ref().unwrap().decrypt_in_place(nonce, payload) {
+            let aad: [u8; 0] = [];
+            if let Err(_) = self.cipher.as_ref().unwrap().decrypt_in_place(nonce, &aad, &mut to_decrypt[..bytes_to_decrypt]) {
                 return Err(XmodemError::DecryptionError);
             }
             
@@ -220,8 +221,8 @@ impl CryptoOperations for AesGcmCrypto {
     
     fn init_encryption(&mut self, key: &[u8], nonce: &[u8], header: &[u8]) -> Result<(), XmodemError> {
         // Create a new cipher instance
-        let key = Key::<Aes128Gcm>::from_slice(key);
-        self.cipher = Some(Aes128Gcm::new(key));
+        let key = Key::<AesGcm<Aes128, U12>>::from_slice(key);
+        self.cipher = Some(AesGcm::<Aes128, U12>::new(key));
         
         // Copy the nonce
         self.nonce.copy_from_slice(nonce);
@@ -256,16 +257,15 @@ impl CryptoOperations for AesGcmCrypto {
         // If we have enough data to fill the output buffer, encrypt it
         let bytes_to_encrypt = cmp::min(self.buffer.len(), output.len());
         if bytes_to_encrypt > 0 {
-            let nonce = Nonce::<Aes128Gcm>::from_slice(&self.nonce);
+            let nonce = Nonce::<U12>::from_slice(&self.nonce);
             
             // Prepare a copy of the data to encrypt
             let mut to_encrypt = [0u8; PACKET_1K_SIZE];
             to_encrypt[..bytes_to_encrypt].copy_from_slice(&self.buffer.as_ref()[..bytes_to_encrypt]);
             
             // Encrypt in-place
-            let aad = [];
-            let payload = Payload { msg: &mut to_encrypt[..bytes_to_encrypt], aad: &aad };
-            if let Err(_) = self.cipher.as_ref().unwrap().encrypt_in_place(nonce, payload) {
+            let aad: [u8; 0] = [];
+            if let Err(_) = self.cipher.as_ref().unwrap().encrypt_in_place(nonce, &aad, &mut to_encrypt[..bytes_to_encrypt]) {
                 return Err(XmodemError::DecryptionError);
             }
             
@@ -614,11 +614,13 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
                 return Err(XmodemError::BufferOverflow);
             }
             
-            let header_data = &self.buffer[header_offset..(header_offset + IMAGE_HEADER_SIZE)];
+            // Create a copy of header data to avoid borrow conflicts
+            let mut header_data_copy: [u8; IMAGE_HEADER_SIZE] = [0; IMAGE_HEADER_SIZE];
+            header_data_copy.copy_from_slice(&self.buffer[header_offset..(header_offset + IMAGE_HEADER_SIZE)]);
             
             // Verify the header before erasing anything
             if !self.header_verified {
-                match self.verify_image_header(header_data) {
+                match self.verify_image_header(&header_data_copy) {
                     Ok(()) => {
                         // Header verification passed
                         self.header_verified = true;
@@ -645,11 +647,11 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
             }
             
             // Calculate total encrypted length (excluding authentication tag)
-            self.remaining_encrypted_length = self.file_size - AUTH_TAG_SIZE as u32;
+            self.remaining_encrypted_length = self.file_size - (AUTH_TAG_SIZE as u32);
             
             // Calculate total packets and remaining bytes
-            self.remaining_packets = (self.file_size + NONCE_SIZE as u32 + FILE_SIZE_FIELD as u32) / self.packet_size as u32;
-            self.remaining_bytes_in_last_packet = (self.file_size + NONCE_SIZE as u32 + FILE_SIZE_FIELD as u32) % self.packet_size as u32;
+            self.remaining_packets = (self.file_size + (NONCE_SIZE as u32) + (FILE_SIZE_FIELD as u32)) / (self.packet_size as u32);
+            self.remaining_bytes_in_last_packet = (self.file_size + (NONCE_SIZE as u32) + (FILE_SIZE_FIELD as u32)) % (self.packet_size as u32);
             
             if self.remaining_bytes_in_last_packet != 0 {
                 self.remaining_packets += 1;
@@ -662,7 +664,7 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
             self.crypto.init_decryption(&self.key, &self.nonce, &self.aad_header)?;
             
             // Write the header to flash
-            self.flash.write(self.target_address, header_data)?;
+            self.flash.write(self.target_address, &header_data_copy)?;
             
             // Process the data part in the first packet
             let data_offset = header_offset + IMAGE_HEADER_SIZE;
@@ -677,14 +679,14 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
                 
                 // Write the decrypted data to flash
                 self.flash.write(
-                    self.target_address + IMAGE_HEADER_SIZE as u32,
+                    self.target_address + (IMAGE_HEADER_SIZE as u32),
                     &self.data_buffer[..decrypted_len]
                 )?;
                 
-                self.current_address = self.target_address + IMAGE_HEADER_SIZE as u32 + decrypted_len as u32;
+                self.current_address = self.target_address + (IMAGE_HEADER_SIZE as u32) + (decrypted_len as u32);
                 self.bytes_received = decrypted_len as u32;
             } else {
-                self.current_address = self.target_address + IMAGE_HEADER_SIZE as u32;
+                self.current_address = self.target_address + (IMAGE_HEADER_SIZE as u32);
                 self.bytes_received = 0;
             }
             
