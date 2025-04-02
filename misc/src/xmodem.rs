@@ -16,8 +16,6 @@ use aes_gcm::{
 use aes::cipher::consts::U12;
 use aes::Aes128;
 
-use crate::vec::Vec;
-
 // XMODEM constants
 pub const X_SOH: u8 = 0x01; // Start of 128-byte packet
 pub const X_STX: u8 = 0x02; // Start of 1024-byte packet
@@ -109,24 +107,26 @@ pub trait CryptoOperations {
 /// AES-GCM Crypto implementation
 pub struct AesGcmCrypto {
     cipher: Option<AesGcm<Aes128, U12>>,
-    buffer: Vec<u8, BUFFER_SIZE>,
+    buffer: [u8; BUFFER_SIZE],
+    buffer_len: usize,
     nonce: [u8; NONCE_SIZE],
     tag: [u8; AUTH_TAG_SIZE],
     tag_calculated: bool,
     encrypt_mode: bool,
-    key: [u8; 16], // Add the key field
+    key: [u8; 16],
 }
 
 impl AesGcmCrypto {
     pub fn new() -> Self {
         Self {
             cipher: None,
-            buffer: Vec::new(),
+            buffer: [0; BUFFER_SIZE],
+            buffer_len: 0,
             nonce: [0; NONCE_SIZE],
             tag: [0; AUTH_TAG_SIZE],
             tag_calculated: false,
             encrypt_mode: false,
-            key: [0; 16], // Initialize with zeros
+            key: [0; 16],
         }
     }
 }
@@ -148,7 +148,7 @@ impl CryptoOperations for AesGcmCrypto {
         self.nonce.copy_from_slice(nonce);
         
         // Clear the internal buffer
-        self.buffer.clear();
+        self.buffer_len = 0;
         
         self.tag_calculated = false;
         self.encrypt_mode = false;
@@ -162,8 +162,8 @@ impl CryptoOperations for AesGcmCrypto {
         }
         
         // Instead of incremental decryption, we buffer the data
-        let current_len = self.buffer.len();
-        let bytes_to_add = cmp::min(data.len(), self.buffer.capacity() - current_len);
+        let current_len = self.buffer_len;
+        let bytes_to_add = cmp::min(data.len(), BUFFER_SIZE - current_len);
         
         if bytes_to_add == 0 {
             return Err(XmodemError::BufferOverflow);
@@ -171,17 +171,18 @@ impl CryptoOperations for AesGcmCrypto {
         
         // Add data to buffer
         for i in 0..bytes_to_add {
-            self.buffer.push(data[i]);
+            self.buffer[current_len + i] = data[i];
         }
+        self.buffer_len += bytes_to_add;
         
         // If we have enough data to fill the output buffer, decrypt it
-        let bytes_to_decrypt = cmp::min(self.buffer.len(), output.len());
+        let bytes_to_decrypt = cmp::min(self.buffer_len, output.len());
         if bytes_to_decrypt > 0 {
             let nonce = Nonce::<U12>::from_slice(&self.nonce);
             
             // Prepare a copy of the data to decrypt
             let mut to_decrypt = [0u8; PACKET_1K_SIZE];
-            to_decrypt[..bytes_to_decrypt].copy_from_slice(&self.buffer.as_ref()[..bytes_to_decrypt]);
+            to_decrypt[..bytes_to_decrypt].copy_from_slice(&self.buffer[..bytes_to_decrypt]);
             
             // For no_std environments, we can't use the direct decrypt_in_place method
             // Instead, we'll implement a simple XOR-based decryption for now
@@ -196,10 +197,10 @@ impl CryptoOperations for AesGcmCrypto {
             output[..bytes_to_decrypt].copy_from_slice(&to_decrypt[..bytes_to_decrypt]);
             
             // Remove the processed data from the buffer
-            for i in 0..self.buffer.len() - bytes_to_decrypt {
+            for i in 0..self.buffer_len - bytes_to_decrypt {
                 self.buffer[i] = self.buffer[i + bytes_to_decrypt];
             }
-            self.buffer.truncate(self.buffer.len() - bytes_to_decrypt);
+            self.buffer_len -= bytes_to_decrypt;
             
             Ok(bytes_to_decrypt)
         } else {
@@ -224,7 +225,7 @@ impl CryptoOperations for AesGcmCrypto {
     
     fn finish_decryption(&mut self) -> Result<(), XmodemError> {
         self.cipher = None;
-        self.buffer.clear();
+        self.buffer_len = 0;
         self.tag_calculated = false;
         
         Ok(())
@@ -246,7 +247,7 @@ impl CryptoOperations for AesGcmCrypto {
         self.nonce.copy_from_slice(nonce);
         
         // Clear the internal buffer
-        self.buffer.clear();
+        self.buffer_len = 0;
         
         self.tag_calculated = false;
         self.encrypt_mode = true;
@@ -260,8 +261,8 @@ impl CryptoOperations for AesGcmCrypto {
         }
         
         // Similar to decryption, we buffer the data
-        let current_len = self.buffer.len();
-        let bytes_to_add = cmp::min(data.len(), self.buffer.capacity() - current_len);
+        let current_len = self.buffer_len;
+        let bytes_to_add = cmp::min(data.len(), BUFFER_SIZE - current_len);
         
         if bytes_to_add == 0 {
             return Err(XmodemError::BufferOverflow);
@@ -269,17 +270,18 @@ impl CryptoOperations for AesGcmCrypto {
         
         // Add data to buffer
         for i in 0..bytes_to_add {
-            self.buffer.push(data[i]);
+            self.buffer[current_len + i] = data[i];
         }
+        self.buffer_len += bytes_to_add;
         
         // If we have enough data to fill the output buffer, encrypt it
-        let bytes_to_encrypt = cmp::min(self.buffer.len(), output.len());
+        let bytes_to_encrypt = cmp::min(self.buffer_len, output.len());
         if bytes_to_encrypt > 0 {
             let nonce = Nonce::<U12>::from_slice(&self.nonce);
             
             // Prepare a copy of the data to encrypt
             let mut to_encrypt = [0u8; PACKET_1K_SIZE];
-            to_encrypt[..bytes_to_encrypt].copy_from_slice(&self.buffer.as_ref()[..bytes_to_encrypt]);
+            to_encrypt[..bytes_to_encrypt].copy_from_slice(&self.buffer[..bytes_to_encrypt]);
             
             // For no_std environments, we can't use the direct encrypt_in_place method
             // Instead, we'll implement a simple XOR-based encryption for now
@@ -294,10 +296,10 @@ impl CryptoOperations for AesGcmCrypto {
             output[..bytes_to_encrypt].copy_from_slice(&to_encrypt[..bytes_to_encrypt]);
             
             // Remove the processed data from the buffer
-            for i in 0..self.buffer.len() - bytes_to_encrypt {
+            for i in 0..self.buffer_len - bytes_to_encrypt {
                 self.buffer[i] = self.buffer[i + bytes_to_encrypt];
             }
-            self.buffer.truncate(self.buffer.len() - bytes_to_encrypt);
+            self.buffer_len -= bytes_to_encrypt;
             
             Ok(bytes_to_encrypt)
         } else {
@@ -323,7 +325,7 @@ impl CryptoOperations for AesGcmCrypto {
     
     fn finish_encryption(&mut self) -> Result<(), XmodemError> {
         self.cipher = None;
-        self.buffer.clear();
+        self.buffer_len = 0;
         self.tag_calculated = false;
         
         Ok(())

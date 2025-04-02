@@ -4,7 +4,6 @@
 pub mod ring_buffer;
 pub mod xmodem;
 pub mod image;
-pub mod vec;
 
 pub use ring_buffer::RingBuffer;
 pub use xmodem::{
