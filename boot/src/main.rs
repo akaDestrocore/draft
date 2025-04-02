@@ -179,10 +179,7 @@ fn prepare_for_jump(p: &Peripherals) {
 }
 
 fn boot_to_image(addr: u32) -> ! {
-    let header_size: u32 = IMAGE_HEADER_SIZE as u32;
-    
-    // right after header
-    let vectors_addr: u32 = addr + header_size;
+    let vectors_addr: u32 = addr + 0x200;
     
     // SP
     let stack_addr: u32 = unsafe {
