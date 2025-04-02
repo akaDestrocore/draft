@@ -37,16 +37,6 @@ pub const PATCH_ADDR: u32 = 0x08040000;
 pub const BACKUP_ADDR: u32 = 0x08060000;
 pub const SLOT_1_APP_LOADER_ADDR: u32 = 0x08004000;
 
-/// Image header structure for firmware version information
-#[repr(C, packed)]
-pub struct ImageHeader {
-    pub signature0: u32,
-    pub signature1: u8,
-    pub version_major: u8,
-    pub version_minor: u8,
-    pub version_patch: u8,
-}
-
 /// XMODEM state machine states
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum XmodemState {
@@ -217,10 +207,9 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
         // For now, we'll use the predefined header from initialization
         if let Some(backup_header) = self.get_backup_version() {
             // Update AAD header with backup version
-            self.aad_header[12] = backup_header.signature1;
-            self.aad_header[13] = backup_header.version_major;
-            self.aad_header[14] = backup_header.version_minor;
-            self.aad_header[15] = backup_header.version_patch;
+            self.aad_header[12] = backup_header.version_major;
+            self.aad_header[13] = backup_header.version_minor;
+            self.aad_header[14] = backup_header.version_patch;
         }
         
         Ok(())
@@ -238,10 +227,27 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
     pub fn get_backup_version(&self) -> Option<ImageHeader> {
         // Read version info from backup location
         let backup_ptr = BACKUP_ADDR as *const ImageHeader;
-        if unsafe { (*backup_ptr).signature0 } == 0xFFFFFFFF {
+        let magic = unsafe { (*backup_ptr).image_magic };
+        
+        if magic == 0xFFFFFFFF {
             None
         } else {
-            Some(unsafe { *backup_ptr })
+            // В Rust приходится делать клонирование для перемещения из raw pointer
+            unsafe {
+                let header = *backup_ptr;
+                Some(ImageHeader { 
+                    image_magic: header.image_magic,
+                    image_hdr_version: header.image_hdr_version,
+                    image_type: header.image_type,
+                    version_major: header.version_major,
+                    version_minor: header.version_minor,
+                    version_patch: header.version_patch,
+                    _padding: header._padding,
+                    vector_addr: header.vector_addr,
+                    crc: header.crc,
+                    data_size: header.data_size,
+                })
+            }
         }
     }
     
@@ -282,7 +288,20 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
             } else {
                 // Возможно, действительный заголовок существует
                 let header_ptr = self.target_address as *const ImageHeader;
-                Some(core::ptr::read_unaligned(header_ptr))
+                // Клонируем заголовок
+                let header = *header_ptr;
+                Some(ImageHeader { 
+                    image_magic: header.image_magic,
+                    image_hdr_version: header.image_hdr_version,
+                    image_type: header.image_type,
+                    version_major: header.version_major,
+                    version_minor: header.version_minor,
+                    version_patch: header.version_patch,
+                    _padding: header._padding,
+                    vector_addr: header.vector_addr,
+                    crc: header.crc,
+                    data_size: header.data_size,
+                })
             }
         };
         
