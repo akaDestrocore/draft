@@ -666,14 +666,14 @@ fn SysTick() {
 }
 
 #[exception]
-fn HardFault(info: &cortex_m_rt::ExceptionFrame) -> ! {
+unsafe fn HardFault(info: &cortex_m_rt::ExceptionFrame) -> ! {
     loop {
         asm::nop();
     }
 }
 
 #[exception]
-fn DefaultHandler(irqn: i16) {
+unsafe fn DefaultHandler(irqn: i16) {
     loop {
         asm::nop();
     }

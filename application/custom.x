@@ -13,5 +13,3 @@ SECTIONS
     } > RAM2
 }
 
-/* Include the main link script from cortex-m-rt */
-INCLUDE cortex-m-rt/link.x

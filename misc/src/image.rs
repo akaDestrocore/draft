@@ -1,8 +1,8 @@
 #![no_std]
 
-pub const IMAGE_MAGIC_LOADER: u32 = 0x4C4F4144;    // "LOAD"
-pub const IMAGE_MAGIC_UPDATER: u32 = 0x55504454;   // "UPDT"
-pub const IMAGE_MAGIC_APP: u32 = 0x4150504C;       // "APPL"
+pub const IMAGE_MAGIC_LOADER: u32 = 0xDEADC0DE;    // "LOAD"
+pub const IMAGE_MAGIC_UPDATER: u32 = 0xFEEDFACE;   // "UPDT"
+pub const IMAGE_MAGIC_APP: u32 = 0xC0FFEE00;       // "APPL"
 
 pub const IMAGE_VERSION_CURRENT: u16 = 0x0100;
 
