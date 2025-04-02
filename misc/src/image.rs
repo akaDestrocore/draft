@@ -12,6 +12,7 @@ pub const IMAGE_TYPE_UPDATER: u8 = 2;
 pub const IMAGE_TYPE_APP: u8 = 3;
 
 // Firmware image header structure
+#[derive(Clone, Copy)]
 #[repr(C, packed)]
 pub struct ImageHeader {
     pub image_magic: u32,           // Magic number to identify the image type

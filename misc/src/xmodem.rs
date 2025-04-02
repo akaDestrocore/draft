@@ -227,29 +227,15 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
     pub fn get_backup_version(&self) -> Option<ImageHeader> {
         // Read version info from backup location
         let backup_ptr = BACKUP_ADDR as *const ImageHeader;
-        let magic = unsafe { (*backup_ptr).image_magic };
+        let magic: u32 = unsafe { (*backup_ptr).image_magic };
         
         if magic == 0xFFFFFFFF {
             None
         } else {
-            // В Rust приходится делать клонирование для перемещения из raw pointer
-            unsafe {
-                let header = *backup_ptr;
-                Some(ImageHeader { 
-                    image_magic: header.image_magic,
-                    image_hdr_version: header.image_hdr_version,
-                    image_type: header.image_type,
-                    version_major: header.version_major,
-                    version_minor: header.version_minor,
-                    version_patch: header.version_patch,
-                    _padding: header._padding,
-                    vector_addr: header.vector_addr,
-                    crc: header.crc,
-                    data_size: header.data_size,
-                })
-            }
+            unsafe { Some(*backup_ptr) }
         }
     }
+    
     
     /// Verify image header before erasing flash
     fn verify_image_header(&self, header_data: &[u8]) -> Result<(), XmodemError> {
@@ -279,7 +265,6 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
             return Err(XmodemError::InvalidImageType);
         }
         
-        // Пытаемся прочитать текущий заголовок по целевому адресу
         let current_header = unsafe {
             let magic = *(self.target_address as *const u32);
             if magic == 0xFFFFFFFF {
@@ -288,20 +273,8 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
             } else {
                 // Возможно, действительный заголовок существует
                 let header_ptr = self.target_address as *const ImageHeader;
-                // Клонируем заголовок
-                let header = *header_ptr;
-                Some(ImageHeader { 
-                    image_magic: header.image_magic,
-                    image_hdr_version: header.image_hdr_version,
-                    image_type: header.image_type,
-                    version_major: header.version_major,
-                    version_minor: header.version_minor,
-                    version_patch: header.version_patch,
-                    _padding: header._padding,
-                    vector_addr: header.vector_addr,
-                    crc: header.crc,
-                    data_size: header.data_size,
-                })
+                // Now that ImageHeader implements Copy, we can just copy it
+                Some(*header_ptr)
             }
         };
         
