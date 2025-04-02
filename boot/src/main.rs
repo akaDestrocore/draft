@@ -5,13 +5,14 @@ use core::{f32::consts, panic::PanicInfo};
 use cortex_m::{asm, peripheral::{self, scb, SCB, SYST}};
 use cortex_m_rt::entry;
 use stm32f4::{self as pac, Peripherals};
+use misc::image::{ImageHeader, IMAGE_MAGIC_LOADER, IMAGE_MAGIC_UPDATER};
 
 const LOADER_ADDR: u32 = 0x08004000;
 const UPDATER_ADDR: u32 = 0x08008000;
+const IMAGE_HEADER_SIZE: usize = core::mem::size_of::<ImageHeader>();
 
 #[entry]
 fn main() -> ! {
-
     let peripherals = pac::Peripherals::take();
 
     if let Some(p) = peripherals {
@@ -85,8 +86,15 @@ fn setup_system_clock(p: &Peripherals) {
 
 fn check_loader_valid() -> bool {
     unsafe {
-        let loader_value: u32 = *(LOADER_ADDR as *const u32);
-        0xFFFFFFFF != loader_value
+        let header_ptr: *const ImageHeader = LOADER_ADDR as *const ImageHeader;
+        
+        // check if magic is correct
+        if (*header_ptr).image_magic == IMAGE_MAGIC_LOADER {
+            return true;
+        }
+        
+        // if magic is incorrect then loader is corrupted
+        false
     }
 }
 
@@ -168,16 +176,22 @@ fn prepare_for_jump(p: &Peripherals) {
     p.syscfg.memrmp().write(|w| unsafe {
         w.bits(0x01)
     });
-
 }
 
 fn boot_to_image(addr: u32) -> ! {
-    let reset_addr: u32 = addr + 4;
+    let header_size: u32 = IMAGE_HEADER_SIZE as u32;
+    
+    // right after header
+    let vectors_addr: u32 = addr + header_size;
+    
+    // SP
     let stack_addr: u32 = unsafe {
-        *(addr as *const u32)
+        *(vectors_addr as *const u32)
     };
+    
+    // reset handler
     let reset_vector: u32 = unsafe {
-        *(reset_addr as *const u32)
+        *((vectors_addr + 4) as *const u32)
     };
 
     // disable SysTick
@@ -199,7 +213,7 @@ fn boot_to_image(addr: u32) -> ! {
         ));
 
         // vector table
-        (*scb).vtor.write(addr);
+        (*scb).vtor.write(vectors_addr);
 
         // set msp
         core::arch::asm!("MSR msp, {0}", in(reg) stack_addr);
