@@ -12,7 +12,22 @@ use cortex_m::{
 
 use cortex_m_rt::{entry, exception};
 use stm32f4::{self as pac, ethernet_ptp::ptpppscr, Peripherals, Usart2};
-use misc::ring_buffer::RingBuffer;
+use misc::{
+    ring_buffer::RingBuffer,
+    image::{ImageHeader, SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER}
+};
+
+#[no_mangle]
+#[link_section = ".image_hdr"]
+pub static IMAGE_HEADER: ImageHeader = ImageHeader::new(
+    IMAGE_TYPE_LOADER,
+    IMAGE_MAGIC_LOADER,
+    1, 0, 0  // ver 1.0.0
+);
+
+#[no_mangle]
+#[link_section = ".shared_memory"]
+pub static mut SHARED_MEMORY: SharedMemory = SharedMemory::new();
 
 pub struct Mutex<T> {
     inner: UnsafeCell<T>
