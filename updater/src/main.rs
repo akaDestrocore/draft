@@ -5,7 +5,16 @@ use core::panic::PanicInfo;
 use cortex_m::asm;
 use cortex_m_rt::entry;
 use stm32f4 as pac;
+use misc::image::{ImageHeader, SharedMemory, IMAGE_MAGIC_UPDATER, IMAGE_TYPE_UPDATER};
 
+
+#[no_mangle]
+#[link_section = ".image_hdr"]
+pub static IMAGE_HEADER: ImageHeader = ImageHeader::new(
+    IMAGE_TYPE_UPDATER,
+    IMAGE_MAGIC_UPDATER,
+    1, 0, 0  // ver 1.0.0
+);
 
 #[entry]
 fn main() -> ! {
