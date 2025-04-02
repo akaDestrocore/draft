@@ -12,9 +12,18 @@ pub struct Vec<T, const N: usize> {
 }
 
 impl<T: Copy + Default, const N: usize> Vec<T, N> {
-    pub const fn new() -> Self {
+    // Изменим константный конструктор на обычный
+    pub fn new() -> Self {
         Self {
             data: [T::default(); N],
+            len: 0,
+        }
+    }
+
+    // Или добавим альтернативный метод для создания с непустым начальным значением
+    pub fn new_with(value: T) -> Self {
+        Self {
+            data: [value; N],
             len: 0,
         }
     }
@@ -29,6 +38,7 @@ impl<T: Copy + Default, const N: usize> Vec<T, N> {
         }
     }
 
+    // Остальные методы без изменений
     pub fn pop(&mut self) -> Option<T> {
         if self.len > 0 {
             self.len -= 1;
@@ -58,14 +68,6 @@ impl<T: Copy + Default, const N: usize> Vec<T, N> {
         if len < self.len {
             self.len = len;
         }
-    }
-}
-
-impl<T, const N: usize> Deref for Vec<T, N> {
-    type Target = [T];
-
-    fn deref(&self) -> &Self::Target {
-        &self.data[0..self.len]
     }
 }
 

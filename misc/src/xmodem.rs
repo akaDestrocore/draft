@@ -642,11 +642,11 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
             }
             
             // Calculate total encrypted length (excluding authentication tag)
-            self.remaining_encrypted_length = self.file_size - AUTH_TAG_SIZE;
+            self.remaining_encrypted_length = self.file_size - AUTH_TAG_SIZE as u32;
             
             // Calculate total packets and remaining bytes
-            self.remaining_packets = (self.file_size + NONCE_SIZE + FILE_SIZE_FIELD) / self.packet_size as u32;
-            self.remaining_bytes_in_last_packet = (self.file_size + NONCE_SIZE + FILE_SIZE_FIELD) % self.packet_size as u32;
+            self.remaining_packets = (self.file_size + NONCE_SIZE as u32 + FILE_SIZE_FIELD as u32) / self.packet_size as u32;
+            self.remaining_bytes_in_last_packet = (self.file_size + NONCE_SIZE as u32 + FILE_SIZE_FIELD as u32) % self.packet_size as u32;
             
             if self.remaining_bytes_in_last_packet != 0 {
                 self.remaining_packets += 1;
