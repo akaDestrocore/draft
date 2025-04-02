@@ -8,6 +8,11 @@ use crate::image::{
     IMAGE_TYPE_LOADER, IMAGE_TYPE_UPDATER, IMAGE_TYPE_APP
 };
 
+use aes_gcm::{
+    aead::{AeadInPlace, KeyInit, Payload},
+    Aes128Gcm, Key, Nonce, Tag,
+};
+
 // XMODEM constants
 pub const X_SOH: u8 = 0x01; // Start of 128-byte packet
 pub const X_STX: u8 = 0x02; // Start of 1024-byte packet
@@ -63,11 +68,11 @@ pub enum XmodemError {
     UnexpectedEOT,          // Unexpected end of transmission
     InvalidPacketType,      // Invalid packet type received
     
-    // Новые типы ошибок для проверки заголовков
-    InvalidImageType,       // Тип образа не соответствует ожидаемому
-    InvalidMagic,           // Неверный магический номер
-    OlderVersion,           // Полученная версия не новее установленной
-    HeaderCheckFailed,      // Общая ошибка проверки заголовка
+    // New error types for header verification
+    InvalidImageType,       // Image type doesn't match expected
+    InvalidMagic,           // Invalid magic number
+    OlderVersion,           // Received version is not newer than installed
+    HeaderCheckFailed,      // General header check failed
 }
 
 /// Update type (full or patch)
@@ -94,6 +99,206 @@ pub trait CryptoOperations {
     fn encrypt_chunk(&mut self, data: &[u8], output: &mut [u8]) -> Result<usize, XmodemError>;
     fn get_tag(&mut self, tag: &mut [u8]) -> Result<(), XmodemError>;
     fn finish_encryption(&mut self) -> Result<(), XmodemError>;
+}
+
+/// AES-GCM Crypto implementation
+pub struct AesGcmCrypto {
+    cipher: Option<Aes128Gcm>,
+    buffer: Vec<u8, BUFFER_SIZE>,
+    nonce: [u8; NONCE_SIZE],
+    tag: [u8; AUTH_TAG_SIZE],
+    tag_calculated: bool,
+    encrypt_mode: bool,
+}
+
+impl AesGcmCrypto {
+    pub fn new() -> Self {
+        Self {
+            cipher: None,
+            buffer: Vec::new(),
+            nonce: [0; NONCE_SIZE],
+            tag: [0; AUTH_TAG_SIZE],
+            tag_calculated: false,
+            encrypt_mode: false,
+        }
+    }
+}
+
+impl CryptoOperations for AesGcmCrypto {
+    fn init_decryption(&mut self, key: &[u8], nonce: &[u8], header: &[u8]) -> Result<(), XmodemError> {
+        // Create a new cipher instance
+        let key = Key::<Aes128Gcm>::from_slice(key);
+        self.cipher = Some(Aes128Gcm::new(key));
+        
+        // Copy the nonce
+        self.nonce.copy_from_slice(nonce);
+        
+        // Clear the internal buffer
+        self.buffer.clear();
+        
+        self.tag_calculated = false;
+        self.encrypt_mode = false;
+        
+        Ok(())
+    }
+    
+    fn decrypt_chunk(&mut self, data: &[u8], output: &mut [u8]) -> Result<usize, XmodemError> {
+        if self.cipher.is_none() {
+            return Err(XmodemError::DecryptionError);
+        }
+        
+        // Instead of incremental decryption, we buffer the data
+        // This is because AES-GCM requires the entire ciphertext before decryption
+        let current_len = self.buffer.len();
+        let bytes_to_add = cmp::min(data.len(), self.buffer.capacity() - current_len);
+        
+        if bytes_to_add == 0 {
+            return Err(XmodemError::BufferOverflow);
+        }
+        
+        // Add data to buffer
+        for i in 0..bytes_to_add {
+            self.buffer.push(data[i]);
+        }
+        
+        // If we have enough data to fill the output buffer, decrypt it
+        let bytes_to_decrypt = cmp::min(self.buffer.len(), output.len());
+        if bytes_to_decrypt > 0 {
+            let nonce = Nonce::<Aes128Gcm>::from_slice(&self.nonce);
+            
+            // Prepare a copy of the data to decrypt
+            let mut to_decrypt = [0u8; PACKET_1K_SIZE];
+            to_decrypt[..bytes_to_decrypt].copy_from_slice(&self.buffer[..bytes_to_decrypt]);
+            
+            // Decrypt in-place
+            let aad = [];
+            let payload = Payload { msg: &mut to_decrypt[..bytes_to_decrypt], aad: &aad };
+            if let Err(_) = self.cipher.as_ref().unwrap().decrypt_in_place(nonce, payload) {
+                return Err(XmodemError::DecryptionError);
+            }
+            
+            // Copy the result to the output buffer
+            output[..bytes_to_decrypt].copy_from_slice(&to_decrypt[..bytes_to_decrypt]);
+            
+            // Remove the processed data from the buffer
+            for i in 0..self.buffer.len() - bytes_to_decrypt {
+                self.buffer[i] = self.buffer[i + bytes_to_decrypt];
+            }
+            self.buffer.truncate(self.buffer.len() - bytes_to_decrypt);
+            
+            Ok(bytes_to_decrypt)
+        } else {
+            Ok(0)
+        }
+    }
+    
+    fn verify_tag(&mut self, expected_tag: &[u8]) -> Result<(), XmodemError> {
+        if expected_tag.len() != AUTH_TAG_SIZE {
+            return Err(XmodemError::AuthenticationError);
+        }
+        
+        // Compare expected tag with calculated tag
+        for i in 0..AUTH_TAG_SIZE {
+            if expected_tag[i] != self.tag[i] {
+                return Err(XmodemError::AuthenticationError);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    fn finish_decryption(&mut self) -> Result<(), XmodemError> {
+        self.cipher = None;
+        self.buffer.clear();
+        self.tag_calculated = false;
+        
+        Ok(())
+    }
+    
+    fn init_encryption(&mut self, key: &[u8], nonce: &[u8], header: &[u8]) -> Result<(), XmodemError> {
+        // Create a new cipher instance
+        let key = Key::<Aes128Gcm>::from_slice(key);
+        self.cipher = Some(Aes128Gcm::new(key));
+        
+        // Copy the nonce
+        self.nonce.copy_from_slice(nonce);
+        
+        // Clear the internal buffer
+        self.buffer.clear();
+        
+        self.tag_calculated = false;
+        self.encrypt_mode = true;
+        
+        Ok(())
+    }
+    
+    fn encrypt_chunk(&mut self, data: &[u8], output: &mut [u8]) -> Result<usize, XmodemError> {
+        if self.cipher.is_none() {
+            return Err(XmodemError::DecryptionError);
+        }
+        
+        // Similar to decryption, we buffer the data
+        let current_len = self.buffer.len();
+        let bytes_to_add = cmp::min(data.len(), self.buffer.capacity() - current_len);
+        
+        if bytes_to_add == 0 {
+            return Err(XmodemError::BufferOverflow);
+        }
+        
+        // Add data to buffer
+        for i in 0..bytes_to_add {
+            self.buffer.push(data[i]);
+        }
+        
+        // If we have enough data to fill the output buffer, encrypt it
+        let bytes_to_encrypt = cmp::min(self.buffer.len(), output.len());
+        if bytes_to_encrypt > 0 {
+            let nonce = Nonce::<Aes128Gcm>::from_slice(&self.nonce);
+            
+            // Prepare a copy of the data to encrypt
+            let mut to_encrypt = [0u8; PACKET_1K_SIZE];
+            to_encrypt[..bytes_to_encrypt].copy_from_slice(&self.buffer[..bytes_to_encrypt]);
+            
+            // Encrypt in-place
+            let aad = [];
+            let payload = Payload { msg: &mut to_encrypt[..bytes_to_encrypt], aad: &aad };
+            if let Err(_) = self.cipher.as_ref().unwrap().encrypt_in_place(nonce, payload) {
+                return Err(XmodemError::DecryptionError);
+            }
+            
+            // Copy the result to the output buffer
+            output[..bytes_to_encrypt].copy_from_slice(&to_encrypt[..bytes_to_encrypt]);
+            
+            // Remove the processed data from the buffer
+            for i in 0..self.buffer.len() - bytes_to_encrypt {
+                self.buffer[i] = self.buffer[i + bytes_to_encrypt];
+            }
+            self.buffer.truncate(self.buffer.len() - bytes_to_encrypt);
+            
+            Ok(bytes_to_encrypt)
+        } else {
+            Ok(0)
+        }
+    }
+    
+    fn get_tag(&mut self, tag: &mut [u8]) -> Result<(), XmodemError> {
+        if !self.tag_calculated {
+            return Err(XmodemError::DecryptionError);
+        }
+        
+        // Copy the calculated tag
+        tag[..AUTH_TAG_SIZE].copy_from_slice(&self.tag);
+        
+        Ok(())
+    }
+    
+    fn finish_encryption(&mut self) -> Result<(), XmodemError> {
+        self.cipher = None;
+        self.buffer.clear();
+        self.tag_calculated = false;
+        
+        Ok(())
+    }
 }
 
 /// XMODEM receiver for handling firmware updates
@@ -129,6 +334,9 @@ pub struct XmodemReceiver<F: FlashOperations, C: CryptoOperations> {
     // Tracking variables
     data_counter: usize,
     total_packet_count: u32,
+    remaining_encrypted_length: u32,
+    remaining_packets: u32,
+    remaining_bytes_in_last_packet: u32,
     
     // External dependencies
     flash: F,
@@ -138,7 +346,7 @@ pub struct XmodemReceiver<F: FlashOperations, C: CryptoOperations> {
 impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
     /// Create a new XmodemReceiver
     pub fn new(target_address: u32, update_type: UpdateType, flash: F, crypto: C) -> Self {
-        // Определяем ожидаемый тип образа на основе типа обновления
+        // Define expected image type based on update type
         let expected_image_type = match update_type {
             UpdateType::FullUpdate => IMAGE_TYPE_APP,
             UpdateType::PatchUpdate => IMAGE_TYPE_UPDATER,
@@ -161,24 +369,27 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
             update_type,
             first_packet_complete: false,
             
-            // Поля для проверки заголовков образов
+            // Fields for header verification
             expected_image_type,
             header_verified: false,
             
             key: [
-                0x08, 0xbc, 0x87, 0xcf, 0x0d, 0xd4, 0x57, 0x33, 
-                0xb9, 0x74, 0xB5, 0x7b, 0xb0, 0x8b, 0xc5, 0x2e
+                0xAC, 0x00, 0xD6, 0x7F, 0x21, 0xD2, 0x94, 0x46,
+                0x2F, 0x2A, 0xB6, 0x84, 0xE2, 0xE7, 0x83, 0xF7
             ],
-            nonce: [0x30, 0x00, 0xd4, 0x37, 0xca, 0x8e, 0x89, 0x5e, 0x03, 0x7b, 0x7a, 0xf5],
+            nonce: [0x76, 0x4c, 0x10, 0x12, 0x61, 0x75, 0xc3, 0xa1, 0xc3, 0x94, 0x5f, 0x06],
             auth_tag: [0; AUTH_TAG_SIZE],
             calculated_tag: [0; AUTH_TAG_SIZE],
             aad_header: [
-                0x12, 0xe5, 0x65, 0x3c, 0xb1, 0xc4, 0xdc, 0xfe, 
-                0x43, 0x93, 0x21, 0x0d, 0x65, 0x5b, 0x1d, 0x66
+                0x02, 0x00, 0x07, 0x07, 0x60, 0x61, 0x5F, 0x6B,
+                0x65, 0x73, 0x01, 0x00, 0x00, 0x01, 0xFF, 0xFF
             ],
             
             data_counter: 0,
             total_packet_count: 0,
+            remaining_encrypted_length: 0,
+            remaining_packets: 0,
+            remaining_bytes_in_last_packet: 0,
             
             flash,
             crypto,
@@ -236,19 +447,18 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
         }
     }
     
-    
     /// Verify image header before erasing flash
     fn verify_image_header(&self, header_data: &[u8]) -> Result<(), XmodemError> {
         if header_data.len() < size_of::<ImageHeader>() {
             return Err(XmodemError::HeaderCheckFailed);
         }
         
-        // Парсим заголовок
+        // Parse the header
         let header: ImageHeader = unsafe { 
             core::ptr::read_unaligned(header_data.as_ptr() as *const ImageHeader) 
         };
         
-        // Проверяем магический номер в зависимости от ожидаемого типа
+        // Check the magic number based on expected type
         let expected_magic = match self.expected_image_type {
             IMAGE_TYPE_LOADER => IMAGE_MAGIC_LOADER,
             IMAGE_TYPE_UPDATER => IMAGE_MAGIC_UPDATER,
@@ -260,7 +470,7 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
             return Err(XmodemError::InvalidMagic);
         }
         
-        // Проверяем тип образа
+        // Check image type
         if header.image_type != self.expected_image_type {
             return Err(XmodemError::InvalidImageType);
         }
@@ -268,20 +478,19 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
         let current_header = unsafe {
             let magic = *(self.target_address as *const u32);
             if magic == 0xFFFFFFFF {
-                // Нет действительного заголовка
+                // No valid header
                 None
             } else {
-                // Возможно, действительный заголовок существует
+                // Possibly valid header exists
                 let header_ptr = self.target_address as *const ImageHeader;
-                // Now that ImageHeader implements Copy, we can just copy it
                 Some(*header_ptr)
             }
         };
         
-        // Если действительный заголовок существует, проверяем, что новая версия более новая
+        // If a valid header exists, check that the new version is newer
         if let Some(current_header) = current_header {
             if current_header.image_magic == expected_magic {
-                // Проверяем версию
+                // Check version
                 if header.version_major < current_header.version_major {
                     return Err(XmodemError::OlderVersion);
                 }
@@ -421,22 +630,56 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
             // At this point, header is verified - we can erase the target flash
             self.flash.erase(self.target_address)?;
             
+            // Extract nonce and file size from the first packet
+            self.nonce.copy_from_slice(&self.buffer[header_offset..(header_offset + NONCE_SIZE)]);
+            
+            // Extract file size (encrypted data + tag)
+            self.file_size = self.extract_size(header_offset + NONCE_SIZE);
+            
+            // Check file size limit
+            if self.file_size > 262144 {
+                return Err(XmodemError::FileSizeTooLarge);
+            }
+            
+            // Calculate total encrypted length (excluding authentication tag)
+            self.remaining_encrypted_length = self.file_size - AUTH_TAG_SIZE;
+            
+            // Calculate total packets and remaining bytes
+            self.remaining_packets = (self.file_size + NONCE_SIZE + FILE_SIZE_FIELD) / self.packet_size as u32;
+            self.remaining_bytes_in_last_packet = (self.file_size + NONCE_SIZE + FILE_SIZE_FIELD) % self.packet_size as u32;
+            
+            if self.remaining_bytes_in_last_packet != 0 {
+                self.remaining_packets += 1;
+            }
+            
+            // Update AAD header with current firmware version
+            self.prepare_header()?;
+            
+            // Initialize decryption
+            self.crypto.init_decryption(&self.key, &self.nonce, &self.aad_header)?;
+            
             // Write the header to flash
             self.flash.write(self.target_address, header_data)?;
             
-            // Process the remaining data in the packet
+            // Process the data part in the first packet
             let data_offset = header_offset + IMAGE_HEADER_SIZE;
             let data_len = self.packet_size - IMAGE_HEADER_SIZE;
             
             if data_len > 0 {
-                // Write the data following the header
-                self.flash.write(
-                    self.target_address + IMAGE_HEADER_SIZE as u32,
-                    &self.buffer[data_offset..(data_offset + data_len)]
+                // Decrypt first packet data
+                let decrypted_len = self.crypto.decrypt_chunk(
+                    &self.buffer[data_offset..(data_offset + data_len)],
+                    &mut self.data_buffer
                 )?;
                 
-                self.current_address = self.target_address + IMAGE_HEADER_SIZE as u32 + data_len as u32;
-                self.bytes_received = data_len as u32;
+                // Write the decrypted data to flash
+                self.flash.write(
+                    self.target_address + IMAGE_HEADER_SIZE as u32,
+                    &self.data_buffer[..decrypted_len]
+                )?;
+                
+                self.current_address = self.target_address + IMAGE_HEADER_SIZE as u32 + decrypted_len as u32;
+                self.bytes_received = decrypted_len as u32;
             } else {
                 self.current_address = self.target_address + IMAGE_HEADER_SIZE as u32;
                 self.bytes_received = 0;
@@ -451,17 +694,52 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
                     self.flash.erase(self.current_address)?;
                 }
                 
-                // Decrypt the packet data
-                let data_len = self.packet_size;
-                let decrypted_len = self.crypto.decrypt_chunk(
-                    &self.buffer[3..(3 + data_len)],
-                    &mut self.data_buffer
-                )?;
-                
-                // Write the data to flash
-                self.flash.write(self.current_address, &self.data_buffer[..decrypted_len])?;
-                self.current_address += decrypted_len as u32;
-                self.bytes_received += decrypted_len as u32;
+                // Process the last packet differently if it contains authentication tag
+                if self.remaining_packets == 1 && self.remaining_bytes_in_last_packet > 0 {
+                    let data_len = self.remaining_bytes_in_last_packet as usize - AUTH_TAG_SIZE;
+                    
+                    // Decrypt data part
+                    if data_len > 0 {
+                        let decrypted_len = self.crypto.decrypt_chunk(
+                            &self.buffer[3..(3 + data_len)],
+                            &mut self.data_buffer
+                        )?;
+                        
+                        // Write to flash
+                        self.flash.write(self.current_address, &self.data_buffer[..decrypted_len])?;
+                        self.current_address += decrypted_len as u32;
+                    }
+                    
+                    // Extract authentication tag
+                    self.auth_tag.copy_from_slice(&self.buffer[3 + data_len..(3 + data_len + AUTH_TAG_SIZE)]);
+                    
+                    // Verify authentication tag
+                    self.crypto.verify_tag(&self.auth_tag)?;
+                    
+                    // Finish decryption
+                    self.crypto.finish_decryption()?;
+                } else {
+                    // Regular packet processing
+                    let data_len = self.packet_size;
+                    let decrypted_len = self.crypto.decrypt_chunk(
+                        &self.buffer[3..(3 + data_len)],
+                        &mut self.data_buffer
+                    )?;
+                    
+                    // Write the data to flash
+                    self.flash.write(self.current_address, &self.data_buffer[..decrypted_len])?;
+                    self.current_address += decrypted_len as u32;
+                    self.bytes_received += decrypted_len as u32;
+                    
+                    // Update remaining counters
+                    if self.remaining_encrypted_length >= decrypted_len as u32 {
+                        self.remaining_encrypted_length -= decrypted_len as u32;
+                    }
+                    
+                    if self.remaining_packets > 0 {
+                        self.remaining_packets -= 1;
+                    }
+                }
             } else {
                 return Err(XmodemError::InvalidPacketType);
             }
@@ -505,6 +783,7 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
         // If first packet was not received, send 'C' to request CRC mode
         if !self.first_packet && !self.packet_received {
             self.send_crc_request(tx_buffer);
+            self.first_packet = true;
         }
         
         // If packet was already received, process it and acknowledge
@@ -720,249 +999,5 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
     pub fn set_expected_image_type(&mut self, image_type: u8) {
         self.expected_image_type = image_type;
         self.header_verified = false; // Reset verification status when changing type
-    }
-}
-
-/// Stub implementation for FlashOperations for testing
-#[cfg(test)]
-pub struct StubFlash {
-    pub memory: [u8; 65536],
-}
-
-#[cfg(test)]
-impl StubFlash {
-    pub fn new() -> Self {
-        Self {
-            memory: [0xFF; 65536],
-        }
-    }
-}
-
-#[cfg(test)]
-impl FlashOperations for StubFlash {
-    fn erase(&self, _address: u32) -> Result<(), XmodemError> {
-        // In a real implementation, this would erase a flash sector
-        Ok(())
-    }
-    
-    fn write(&self, address: u32, data: &[u8]) -> Result<(), XmodemError> {
-        // In a real implementation, this would write to flash
-        let start = (address - 0x08000000) as usize;
-        if start + data.len() > self.memory.len() {
-            return Err(XmodemError::FlashError);
-        }
-        
-        for (i, &byte) in data.iter().enumerate() {
-            unsafe {
-                *(self.memory.as_ptr().add(start + i) as *mut u8) = byte;
-            }
-        }
-        
-        Ok(())
-    }
-}
-
-/// Stub implementation for CryptoOperations for testing
-#[cfg(test)]
-pub struct StubCrypto {
-    pub key: [u8; 16],
-    pub nonce: [u8; 12],
-    pub header: [u8; 16],
-    pub initialized: bool,
-}
-
-#[cfg(test)]
-impl StubCrypto {
-    pub fn new() -> Self {
-        Self {
-            key: [0; 16],
-            nonce: [0; 12],
-            header: [0; 16],
-            initialized: false,
-        }
-    }
-}
-
-#[cfg(test)]
-impl CryptoOperations for StubCrypto {
-    fn init_decryption(&mut self, key: &[u8], nonce: &[u8], header: &[u8]) -> Result<(), XmodemError> {
-        self.key.copy_from_slice(key);
-        self.nonce.copy_from_slice(nonce);
-        self.header.copy_from_slice(header);
-        self.initialized = true;
-        Ok(())
-    }
-    
-    fn decrypt_chunk(&mut self, data: &[u8], output: &mut [u8]) -> Result<usize, XmodemError> {
-        if !self.initialized {
-            return Err(XmodemError::DecryptionError);
-        }
-        
-        // In a real implementation, this would decrypt the data using AES-GCM
-        // For testing, we just copy the data (as if it was already decrypted)
-        let len = data.len().min(output.len());
-        output[..len].copy_from_slice(&data[..len]);
-        
-        Ok(len)
-    }
-    
-    fn verify_tag(&mut self, _expected_tag: &[u8]) -> Result<(), XmodemError> {
-        // In a real implementation, this would verify the authentication tag
-        Ok(())
-    }
-    
-    fn finish_decryption(&mut self) -> Result<(), XmodemError> {
-        self.initialized = false;
-        Ok(())
-    }
-    
-    fn init_encryption(&mut self, key: &[u8], nonce: &[u8], header: &[u8]) -> Result<(), XmodemError> {
-        self.key.copy_from_slice(key);
-        self.nonce.copy_from_slice(nonce);
-        self.header.copy_from_slice(header);
-        self.initialized = true;
-        Ok(())
-    }
-    
-    fn encrypt_chunk(&mut self, data: &[u8], output: &mut [u8]) -> Result<usize, XmodemError> {
-        if !self.initialized {
-            return Err(XmodemError::DecryptionError);
-        }
-        
-        // In a real implementation, this would encrypt the data using AES-GCM
-        // For testing, we just copy the data
-        let len = data.len().min(output.len());
-        output[..len].copy_from_slice(&data[..len]);
-        
-        Ok(len)
-    }
-    
-    fn get_tag(&mut self, tag: &mut [u8]) -> Result<(), XmodemError> {
-        // In a real implementation, this would get the authentication tag
-        for i in 0..tag.len() {
-            tag[i] = i as u8;
-        }
-        Ok(())
-    }
-    
-    fn finish_encryption(&mut self) -> Result<(), XmodemError> {
-        self.initialized = false;
-        Ok(())
-    }
-}
-
-/// Real implementation of FlashOperations for STM32F4 microcontrollers
-pub struct Stm32f4Flash;
-
-impl Stm32f4Flash {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-impl FlashOperations for Stm32f4Flash {
-    fn erase(&self, address: u32) -> Result<(), XmodemError> {
-        // Call the actual flash erase function here
-        // Example: FLASH_EraseSector(address)
-        Ok(())
-    }
-    
-    fn write(&self, address: u32, data: &[u8]) -> Result<(), XmodemError> {
-        // Call the actual flash write function here
-        // Example: FLASH_Write(data.as_ptr(), data.len(), address)
-        Ok(())
-    }
-}
-
-/// Real implementation of CryptoOperations using mbedtls-sys or a similar crate
-pub struct MbedtlsCrypto {
-    // This would hold the mbedtls context
-    // Example: gcm_context: mbedtls_gcm_context,
-    initialized: bool,
-}
-
-impl MbedtlsCrypto {
-    pub fn new() -> Self {
-        Self {
-            initialized: false,
-        }
-    }
-}
-
-impl CryptoOperations for MbedtlsCrypto {
-    fn init_decryption(&mut self, _key: &[u8], _nonce: &[u8], _header: &[u8]) -> Result<(), XmodemError> {
-        // Initialize mbedtls AES-GCM for decryption
-        // Example:
-        // mbedtls_gcm_init(&mut self.gcm_context);
-        // mbedtls_gcm_setkey(&mut self.gcm_context, MBEDTLS_CIPHER_ID_AES, key.as_ptr(), 128);
-        // mbedtls_gcm_starts(&mut self.gcm_context, MBEDTLS_GCM_DECRYPT, nonce.as_ptr(), nonce.len(), header.as_ptr(), header.len());
-        self.initialized = true;
-        Ok(())
-    }
-    
-    fn decrypt_chunk(&mut self, _data: &[u8], _output: &mut [u8]) -> Result<usize, XmodemError> {
-        if !self.initialized {
-            return Err(XmodemError::DecryptionError);
-        }
-        
-        // Decrypt data using mbedtls
-        // Example:
-        // mbedtls_gcm_update(&mut self.gcm_context, data.len(), data.as_ptr(), output.as_mut_ptr());
-        Ok(0)
-    }
-    
-    fn verify_tag(&mut self, _expected_tag: &[u8]) -> Result<(), XmodemError> {
-        // Verify the authentication tag
-        // Example:
-        // let mut calculated_tag = [0u8; 16];
-        // mbedtls_gcm_finish(&mut self.gcm_context, calculated_tag.as_mut_ptr(), 16);
-        // if calculated_tag != expected_tag {
-        //     return Err(XmodemError::AuthenticationError);
-        // }
-        Ok(())
-    }
-    
-    fn finish_decryption(&mut self) -> Result<(), XmodemError> {
-        // Finish decryption
-        // Example:
-        // mbedtls_gcm_free(&mut self.gcm_context);
-        self.initialized = false;
-        Ok(())
-    }
-    
-    fn init_encryption(&mut self, _key: &[u8], _nonce: &[u8], _header: &[u8]) -> Result<(), XmodemError> {
-        // Initialize mbedtls AES-GCM for encryption
-        // Example:
-        // mbedtls_gcm_init(&mut self.gcm_context);
-        // mbedtls_gcm_setkey(&mut self.gcm_context, MBEDTLS_CIPHER_ID_AES, key.as_ptr(), 128);
-        // mbedtls_gcm_starts(&mut self.gcm_context, MBEDTLS_GCM_ENCRYPT, nonce.as_ptr(), nonce.len(), header.as_ptr(), header.len());
-        self.initialized = true;
-        Ok(())
-    }
-    
-    fn encrypt_chunk(&mut self, _data: &[u8], _output: &mut [u8]) -> Result<usize, XmodemError> {
-        if !self.initialized {
-            return Err(XmodemError::DecryptionError);
-        }
-        
-        // Encrypt data using mbedtls
-        // Example:
-        // mbedtls_gcm_update(&mut self.gcm_context, data.len(), data.as_ptr(), output.as_mut_ptr());
-        Ok(0)
-    }
-    
-    fn get_tag(&mut self, _tag: &mut [u8]) -> Result<(), XmodemError> {
-        // Get the authentication tag
-        // Example:
-        // mbedtls_gcm_finish(&mut self.gcm_context, tag.as_mut_ptr(), 16);
-        Ok(())
-    }
-    
-    fn finish_encryption(&mut self) -> Result<(), XmodemError> {
-        // Finish encryption
-        // Example:
-        // mbedtls_gcm_free(&mut self.gcm_context);
-        self.initialized = false;
-        Ok(())
     }
 }

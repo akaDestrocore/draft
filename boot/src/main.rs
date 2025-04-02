@@ -98,7 +98,7 @@ fn check_loader_valid() -> bool {
     }
 }
 
-fn prepare_for_jump(p: &Peripherals) {
+fn rcc_deinit(p: &Peripherals) {
     // Reset clock
     p.rcc.cr().modify(|_, w| w.hsion().set_bit());
     while p.rcc.cr().read().hsirdy().bit_is_clear() {
@@ -154,7 +154,9 @@ fn prepare_for_jump(p: &Peripherals) {
 
     // reset all CSR flags
     p.rcc.csr().modify(|_, w| w.rmvf().set_bit());
+}
 
+fn deinit(p: &Peripherals) {
     // force reset for all peripherals
     p.rcc.apb1rstr().write(|w| unsafe { w.bits(0xF6FEC9FF) });
     p.rcc.apb1rstr().write(|w| unsafe { w.bits(0x0) });
@@ -170,6 +172,12 @@ fn prepare_for_jump(p: &Peripherals) {
 
     p.rcc.ahb3rstr().write(|w| unsafe { w.bits(0x00000001) });
     p.rcc.ahb3rstr().write(|w| unsafe { w.bits(0x0) });
+}
+
+fn prepare_for_jump(p: &Peripherals) {
+    
+    rcc_deinit(p);
+    deinit(p);
 
     // remap
     p.rcc.apb2enr().modify(|_, w| w.syscfgen().set_bit());
