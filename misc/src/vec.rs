@@ -71,6 +71,14 @@ impl<T: Copy + Default, const N: usize> Vec<T, N> {
     }
 }
 
+impl<T, const N: usize> Deref for Vec<T, N> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        &self.data[0..self.len]
+    }
+}
+
 impl<T, const N: usize> DerefMut for Vec<T, N> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.data[0..self.len]

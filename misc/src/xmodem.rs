@@ -9,9 +9,12 @@ use crate::image::{
 };
 
 use aes_gcm::{
-    aead::{AeadInPlace, KeyInit, Payload},
-    Aes128Gcm, Key, Nonce, Tag,
+    aead::{AeadInPlace, KeyInit},
+    AesGcm, Aes128, Key, Nonce, Tag,
+    consts::U12,
 };
+
+use crate::vec::Vec;
 
 // XMODEM constants
 pub const X_SOH: u8 = 0x01; // Start of 128-byte packet
@@ -168,7 +171,7 @@ impl CryptoOperations for AesGcmCrypto {
             
             // Prepare a copy of the data to decrypt
             let mut to_decrypt = [0u8; PACKET_1K_SIZE];
-            to_decrypt[..bytes_to_decrypt].copy_from_slice(&self.buffer[..bytes_to_decrypt]);
+            to_decrypt[..bytes_to_decrypt].copy_from_slice(&self.buffer.as_ref()[..bytes_to_decrypt]);
             
             // Decrypt in-place
             let aad = [];
@@ -257,7 +260,7 @@ impl CryptoOperations for AesGcmCrypto {
             
             // Prepare a copy of the data to encrypt
             let mut to_encrypt = [0u8; PACKET_1K_SIZE];
-            to_encrypt[..bytes_to_encrypt].copy_from_slice(&self.buffer[..bytes_to_encrypt]);
+            to_encrypt[..bytes_to_encrypt].copy_from_slice(&self.buffer.as_ref()[..bytes_to_encrypt]);
             
             // Encrypt in-place
             let aad = [];
