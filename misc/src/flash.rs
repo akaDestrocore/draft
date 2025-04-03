@@ -1,7 +1,7 @@
 #![no_std]
 
 use core::ptr;
-use stm32f4::{self as pac, Flash};
+use stm32f4::Flash;
 
 // Flash sector sizes
 const FLASH_SECTORS: [u32; 12] = [
@@ -228,7 +228,7 @@ impl UpdaterFlash {
             // Construct data word from bytes
             let mut data: u32 = 0;
             for j in 0..block_size {
-                if i + j as usize < source_data.len() {
+                if i + (j as usize) < source_data.len() {
                     data |= (source_data[i + j as usize] as u32) << (j * 8);
                 }
             }

@@ -5,7 +5,7 @@ use core::panic::PanicInfo;
 use cortex_m::asm;
 use cortex_m_rt::entry;
 use stm32f4 as pac;
-use misc::flash::Stm32f4Flash;
+use misc::flash::UpdaterFlash;
 
 // Test address - beginning of sector 2 (0x08008000)
 const TEST_ADDR: u32 = 0x08008000;
@@ -16,7 +16,7 @@ const TEST_SIZE: usize = 1024; // 1KB of test data
 #[entry]
 fn main() -> ! {
     // Initialize peripherals
-    let peripherals: stm32f4::Peripherals = unsafe { pac::Peripherals::steal() };
+    let peripherals = unsafe { pac::Peripherals::steal() };
     
     // Setup system clock
     setup_system_clock(&peripherals);
@@ -25,7 +25,7 @@ fn main() -> ! {
     setup_leds(&peripherals);
     
     // Create flash module instance
-    let flash = Stm32f4Flash::new(peripherals.flash);
+    let flash = UpdaterFlash::new(peripherals.flash);
     
     // Prepare test patterns
     let mut test_pattern1 = [0u8; TEST_SIZE];
