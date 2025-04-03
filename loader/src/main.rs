@@ -2,14 +2,18 @@
 #![no_main]
 
 use core::{
-    panic::PanicInfo, 
-    sync::atomic::{AtomicBool, Ordering}
+    cell::UnsafeCell, iter::Cycle, panic::PanicInfo, sync::atomic::{AtomicBool, AtomicU32, Ordering}
 };
-use cortex_m::{asm, peripheral::SYST};
-use cortex_m_rt::entry;
-use stm32f4::{self as pac, Peripherals};
+
+use cortex_m::{
+    asm,
+    peripheral::{self, NVIC, SCB, SYST}
+};
+
+use cortex_m_rt::{entry, exception};
+use stm32f4::{self as pac, Peripherals, Usart2};
 use misc::{
-    flash,
+    ring_buffer::RingBuffer,
     image::{ImageHeader, SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER}
 };
 
@@ -25,376 +29,659 @@ pub static IMAGE_HEADER: ImageHeader = ImageHeader::new(
 #[link_section = ".shared_memory"]
 pub static mut SHARED_MEMORY: SharedMemory = SharedMemory::new();
 
-// Тестовые данные и константы
-const TEST_ADDR: u32 = 0x08020000;  // Начало сектора 5
-const TEST_SIZE: usize = 1024;      // Размер тестовых данных
-const TEST_PATTERN1: u32 = 0xABCDABCD;
-const TEST_PATTERN2: u32 = 0x12341234;
+pub struct Mutex<T> {
+    inner: UnsafeCell<T>
+}
 
-// Глобальные переменные для отслеживания состояния теста
-static TEST_FAILED: AtomicBool = AtomicBool::new(false);
+unsafe impl<T> Sync for Mutex<T> {
+    // access to data is protected by critical sections
+}
+
+impl<T> Mutex<T> {
+    pub const fn new(value: T) -> Self {
+        Self { inner: UnsafeCell::new(value)}
+    }
+
+    pub fn get<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        // always call inside the critical section
+        cortex_m::interrupt::free(|_| {
+            let ptr: *mut T = self.inner.get();
+            f(unsafe {
+                &mut *ptr
+            })
+        })
+    }
+}
+
+const SLOT_2_APP_ADDR: u32 = 0x08020200;
+const UPDATER_ADDR: u32 = 0x08008000;
+const SLOT_2_VER_ADDR: u32 = 0x08020000;
+const BOOT_TIMEOUT_MS: u32 = 10_000; // 10 sec
+
+// systick counter
+static TICK_MS: AtomicU32 = AtomicU32::new(0);
+
+// pointer wrappers
+struct PeripheralPtr<T>(*const T);
+unsafe impl<T> Send for PeripheralPtr<T> {}
+unsafe impl<T> Sync for PeripheralPtr<T> {}
+
+static TX_BUFFER: Mutex<RingBuffer> = Mutex::new(RingBuffer::new());
+static RX_BUFFER: Mutex<RingBuffer> = Mutex::new(RingBuffer::new());
+static TX_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static LOAD_APPLICATION: AtomicBool = AtomicBool::new(false);
+static START_TIME: Mutex<u32> = Mutex::new(0);
+
+// handle like logic - using global pointers for periph
+static USART2_PTR: Mutex<Option<PeripheralPtr<pac::usart2::RegisterBlock>>> =
+    Mutex::new(None);
+static GPIOD_PTR: Mutex<Option<PeripheralPtr<pac::gpiod::RegisterBlock>>> =
+    Mutex::new(None);
 
 #[entry]
 fn main() -> ! {
-    // Получаем доступ к периферии
-    let p = unsafe { pac::Peripherals::steal() };
     
-    // Настройка системных часов
-    setup_system_clock(&p);
-    
-    // Настройка светодиодов
-    setup_leds(&p);
-    
-    // Подготовка тестовых данных
-    let mut test_pattern1 = [0u8; TEST_SIZE];
-    let mut test_pattern2 = [0u8; TEST_SIZE];
-    let mut read_buffer = [0u8; TEST_SIZE];
-    
-    // Заполняем тестовые шаблоны
-    for i in (0..TEST_SIZE).step_by(4) {
-        // Шаблон 1: 0xABCDABCD
-        test_pattern1[i] = (TEST_PATTERN1 & 0xFF) as u8;
-        test_pattern1[i+1] = ((TEST_PATTERN1 >> 8) & 0xFF) as u8;
-        test_pattern1[i+2] = ((TEST_PATTERN1 >> 16) & 0xFF) as u8;
-        test_pattern1[i+3] = ((TEST_PATTERN1 >> 24) & 0xFF) as u8;
-        
-        // Шаблон 2: 0x12341234
-        test_pattern2[i] = (TEST_PATTERN2 & 0xFF) as u8;
-        test_pattern2[i+1] = ((TEST_PATTERN2 >> 8) & 0xFF) as u8;
-        test_pattern2[i+2] = ((TEST_PATTERN2 >> 16) & 0xFF) as u8;
-        test_pattern2[i+3] = ((TEST_PATTERN2 >> 24) & 0xFF) as u8;
-    }
-    
-    // =========== ПОШАГОВЫЙ ТЕСТ FLASH ==============
-    
-    // ШАГ 0: Индикация начала теста (Все светодиоды)
-    set_all_leds(&p, true);
-    delay(500_000);
-    set_all_leds(&p, false);
-    delay(500_000);
-    
-    // ШАГ 1: Стирание сектора - зеленый светодиод
-    toggle_led(&p, 12);  // Зеленый: начало стирания
-    
-    let erase_size: u32 = flash::erase_sector(&p, TEST_ADDR);
-    if erase_size == 0 {
-        // Ошибка стирания - мигаем красным
-        error_blink(&p, 14);
-        TEST_FAILED.store(true, Ordering::SeqCst);
-        halt();
-    }
-    
-    toggle_led(&p, 12);  // Зеленый: конец стирания
-    delay(200_000);
-    
-    // Проверяем, что сектор действительно стерт (все байты 0xFF)
-    flash::read(TEST_ADDR, &mut read_buffer);
-    
-    for &byte in read_buffer.iter() {
-        if byte != 0xFF {
-            // Если хоть один байт не 0xFF, значит стирание не произошло
-            error_blink(&p, 14);
-            TEST_FAILED.store(true, Ordering::SeqCst);
-            halt();
-        }
-    }
-    
-    // ШАГ 2: Запись первого шаблона - оранжевый светодиод
-    toggle_led(&p, 13);  // Оранжевый: начало записи шаблона 1
-    
-    let write_result = flash::write(&p, &test_pattern1, TEST_ADDR);
-    if write_result != 0 {
-        // Ошибка записи - мигаем красным и оранжевым
-        error_blink_dual(&p, 14, 13);
-        TEST_FAILED.store(true, Ordering::SeqCst);
-        halt();
-    }
-    
-    toggle_led(&p, 13);  // Оранжевый: конец записи шаблона 1
-    delay(200_000);
-    
-    // ШАГ 3: Проверка записи первого шаблона - синий светодиод
-    toggle_led(&p, 15);  // Синий: начало проверки шаблона 1
-    
-    flash::read(TEST_ADDR, &mut read_buffer);
-    
-    for i in 0..TEST_SIZE {
-        if read_buffer[i] != test_pattern1[i] {
-            // Если данные не совпадают, значит запись произошла с ошибкой
-            error_blink_dual(&p, 14, 15);
-            TEST_FAILED.store(true, Ordering::SeqCst);
-            halt();
-        }
-    }
-    
-    toggle_led(&p, 15);  // Синий: конец проверки шаблона 1
-    delay(200_000);
-    
-    // ШАГ 4: Повторное стирание сектора - зеленый светодиод
-    toggle_led(&p, 12);  // Зеленый: начало повторного стирания
-    
-    let erase_size = flash::erase_sector(&p, TEST_ADDR);
-    if erase_size == 0 {
-        // Ошибка стирания - мигаем красным
-        error_blink(&p, 14);
-        TEST_FAILED.store(true, Ordering::SeqCst);
-        halt();
-    }
-    
-    toggle_led(&p, 12);  // Зеленый: конец повторного стирания
-    delay(200_000);
-    
-    // Проверяем, что сектор действительно стерт (все байты 0xFF)
-    flash::read(TEST_ADDR, &mut read_buffer);
-    
-    for &byte in read_buffer.iter() {
-        if byte != 0xFF {
-            // Если хоть один байт не 0xFF, значит стирание не произошло
-            error_blink(&p, 14);
-            TEST_FAILED.store(true, Ordering::SeqCst);
-            halt();
-        }
-    }
-    
-    // ШАГ 5: Запись второго шаблона - оранжевый светодиод
-    toggle_led(&p, 13);  // Оранжевый: начало записи шаблона 2
-    
-    let write_result = flash::write(&p, &test_pattern2, TEST_ADDR);
-    if write_result != 0 {
-        // Ошибка записи - мигаем красным и оранжевым
-        error_blink_dual(&p, 14, 13);
-        TEST_FAILED.store(true, Ordering::SeqCst);
-        halt();
-    }
-    
-    toggle_led(&p, 13);  // Оранжевый: конец записи шаблона 2
-    delay(200_000);
-    
-    // ШАГ 6: Проверка записи второго шаблона - синий светодиод
-    toggle_led(&p, 15);  // Синий: начало проверки шаблона 2
-    
-    flash::read(TEST_ADDR, &mut read_buffer);
-    
-    for i in 0..TEST_SIZE {
-        if read_buffer[i] != test_pattern2[i] {
-            // Если данные не совпадают, значит запись произошла с ошибкой
-            error_blink_dual(&p, 14, 15);
-            TEST_FAILED.store(true, Ordering::SeqCst);
-            halt();
-        }
-    }
-    
-    toggle_led(&p, 15);  // Синий: конец проверки шаблона 2
-    delay(200_000);
-    
-    // ШАГ 7: Тест функции множественного стирания - все светодиоды
-    set_all_leds(&p, true);
-    
-    if !flash::erase(&p, TEST_ADDR) {
-        // Ошибка множественного стирания
-        error_blink(&p, 14);
-        TEST_FAILED.store(true, Ordering::SeqCst);
-        halt();
-    }
-    
-    set_all_leds(&p, false);
-    delay(200_000);
-    
-    // ШАГ 8: Проверка множественного стирания - чтение нескольких секторов
-    toggle_led(&p, 15);  // Синий: начало проверки множественного стирания
-    
-    // Проверяем несколько адресов в разных секторах
-    let check_addresses = [TEST_ADDR, TEST_ADDR + 0x10000, TEST_ADDR + 0x20000];
-    for &addr in check_addresses.iter() {
-        flash::read(addr, &mut read_buffer);
-        
-        // Проверяем только первые 16 байтов из каждого сектора
-        for &byte in read_buffer[0..16].iter() {
-            if byte != 0xFF {
-                // Если хоть один байт не 0xFF, значит стирание не произошло
-                error_blink(&p, 14);
-                TEST_FAILED.store(true, Ordering::SeqCst);
-                halt();
+    let p: Peripherals = match pac::Peripherals::take() {
+        Some(p) => p,
+        None => {
+            loop {
+                asm::nop();
             }
         }
+    };
+    
+    let mut cp: cortex_m::Peripherals = match cortex_m::Peripherals::take() {
+        Some(cp) => cp,
+        None => {
+            loop {
+                asm::nop();
+            }
+        }
+    };
+
+    // clock setup
+    setup_system_clock(&p);
+
+    // get current time
+    let current_ms: u32 = TICK_MS.load(Ordering::Relaxed);
+    START_TIME.get(|time: &mut u32| *time = current_ms);
+
+    setup_systick(&mut cp.SYST);
+
+    setup_gpio(&p);
+
+    setup_usart(&p);
+
+    let usart2_ptr: &stm32f4::usart2::RegisterBlock = unsafe {
+        &*(p.usart2.sr().as_ptr() as *const _ as *const pac::usart2::RegisterBlock)
+    };
+    USART2_PTR.get(|ptr| *ptr = Some(PeripheralPtr(usart2_ptr)));
+
+    let gpiod_ptr: &stm32f4::gpiod::RegisterBlock = unsafe { 
+        &*(p.gpiod.bsrr().as_ptr() as *const _ as *const pac::gpiod::RegisterBlock)
+    };
+    GPIOD_PTR.get(|ptr| *ptr = Some(PeripheralPtr(gpiod_ptr)));
+
+    send_welcome_message_polling(&p);
+
+    unsafe {
+        cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USART2);
+
+        // enable USART2 interrupts
+        p.usart2.cr1().modify(|_, w| w
+            .rxneie().enabled()
+            .txeie().enabled()
+        );
     }
-    
-    toggle_led(&p, 15);  // Синий: конец проверки множественного стирания
-    delay(200_000);
-    
-    // Все тесты пройдены успешно!
-    success_pattern(&p);
-    
-    // Бесконечный цикл с миганием зеленого светодиода в случае успеха
+
     loop {
-        toggle_led(&p, 12);  // Зеленый: успешное выполнение
-        delay(1_000_000);
+        process_input();
+
+        if LOAD_APPLICATION.load(Ordering::SeqCst) {
+            boot_application(&p, &mut cp);
+        }
+
+        // check timeout
+        let current_ms: u32 = TICK_MS.load(Ordering::Relaxed);
+        let start_ms: u32 = START_TIME.get(|time: &mut u32| *time);
+        if (current_ms - start_ms) >= BOOT_TIMEOUT_MS {
+            queue_string("\r\nTimeout reached. Booting application...\r\n");
+            
+            // wait to finish
+            while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+                ensure_transmitting();
+            }
+            
+            boot_application(&p, &mut cp);
+        }
+
+        ensure_transmitting();
+
+        asm::wfi();
     }
 }
 
-fn setup_system_clock(p: &pac::Peripherals) {
-    // Включение PWR
+fn setup_system_clock(p: &Peripherals) {
+    // PWR clock
     p.rcc.apb1enr().modify(|_, w| w.pwren().set_bit());
-    
-    // Установка Scale 1 для регулятора напряжения
-    p.pwr.cr().modify(|_, w| unsafe {
-        w.vos().scale1()
-    });
-    
-    // Настройка Flash: 5 wait states, prefetch, инструкции и кэш данных
+
+    // Scale 1
+    p.pwr.cr().modify(|_, w| w.vos().scale1());
+
+    // flash latency
     p.flash.acr().modify(|_, w| w
         .latency().ws5()
-        .prften().enabled()
-        .icen().enabled()
-        .dcen().enabled()
+        .prften().set_bit()
+        .icen().set_bit()
+        .dcen().set_bit()
     );
-    
-    // Включение HSE
+
+    // Enable HSE
     p.rcc.cr().modify(|_, w| w.hseon().set_bit());
-    while p.rcc.cr().read().hserdy().bit_is_clear() {}
-    
-    // Настройка PLL
+    while p.rcc.cr().read().hserdy().bit_is_clear() {
+        // wait
+    }
+
+    // PLL configuration
     p.rcc.pllcfgr().modify(|_, w| unsafe {
-        w.pllsrc().hse()   // HSE как источник для PLL
-         .pllm().bits(4)   // PLLM = 4 для HSE 8MHz: 8MHz/4 = 2MHz
-         .plln().bits(168) // PLLN = 168: 2MHz * 168 = 336MHz 
-         .pllp().div2()    // PLLP = 2: 336MHz/2 = 168MHz
-         .pllq().bits(7)   // PLLQ = 7: 336MHz/7 = 48MHz для USB
+        w.pllsrc().hse()
+        .pllm().bits(4)
+        .plln().bits(90)
+        .pllp().div2()
+        .pllq().bits(4)
     });
-    
-    // Включение PLL
+
+    // Enable PLL
     p.rcc.cr().modify(|_, w| w.pllon().set_bit());
-    while p.rcc.cr().read().pllrdy().bit_is_clear() {}
-    
-    // Настройка делителей для шин AHB, APB1, APB2
+    while p.rcc.cr().read().pllrdy().bit_is_clear() {
+        // wait
+    }
+
+    // bus dividers
     p.rcc.cfgr().modify(|_, w| {
-        w.hpre().div1()     // AHB = SYSCLK/1 = 168MHz
-         .ppre1().div4()    // APB1 = AHB/4 = 42MHz (макс. 42MHz)
-         .ppre2().div2()    // APB2 = AHB/2 = 84MHz (макс. 84MHz)
+        w.hpre().div1()
+        .ppre1().div4()
+        .ppre2().div2()
+    });
+
+    // PLL as sys clock
+    p.rcc.cfgr().modify(|_, w| w.sw().pll());
+    while !p.rcc.cfgr().read().sws().is_pll() {
+        // wait
+    }
+}
+
+fn setup_systick(syst: &mut SYST) {
+    syst.set_clock_source(cortex_m::peripheral::syst::SystClkSource::Core);
+    syst.set_reload(90_000  - 1);
+    syst.clear_current();
+    syst.enable_counter();
+    syst.enable_interrupt();
+}
+
+fn setup_gpio(p: &Peripherals) {
+    p.rcc.ahb1enr().modify(|_, w| {
+        w.gpioaen().enabled()
+        .gpioden().enabled()
+    });
+
+    p.gpioa.moder().modify(|_, w| {
+        w.moder2().alternate()
+        .moder3().alternate()
+    });
+
+    p.gpioa.ospeedr().modify(|_, w| {
+        w.ospeedr2().high_speed()
+         .ospeedr3().high_speed()
     });
     
-    // Установка PLL как источника системных часов
-    p.rcc.cfgr().modify(|_, w| w.sw().pll());
-    while !p.rcc.cfgr().read().sws().is_pll() {}
+    p.gpioa.afrl().modify(|_, w| {
+        w.afrl2().af7()
+         .afrl3().af7()
+    });
+
+    p.gpiod.moder().modify(|_, w| {
+        w.moder12().output()
+         .moder13().output()
+         .moder14().output()
+         .moder15().output()
+    });
+    
+    p.gpiod.otyper().modify(|_, w| {
+        w.ot12().push_pull()
+         .ot13().push_pull()
+         .ot14().push_pull()
+         .ot15().push_pull()
+    });
+    
+    p.gpiod.ospeedr().modify(|_, w| {
+        w.ospeedr12().low_speed()
+         .ospeedr13().low_speed()
+         .ospeedr14().low_speed()
+         .ospeedr15().low_speed()
+    });
 }
 
-fn setup_leds(p: &pac::Peripherals) {
-    // Включение тактирования GPIOD
-    p.rcc.ahb1enr().modify(|_, w| w.gpioden().set_bit());
-    
-    // Настройка пинов светодиодов (PD12-15) как выходы
-    p.gpiod.moder().modify(|_, w| w
-        .moder12().output()  // PD12 - зеленый
-        .moder13().output()  // PD13 - оранжевый
-        .moder14().output()  // PD14 - красный
-        .moder15().output()  // PD15 - синий
-    );
-    
-    // Настройка типа выхода - push-pull
-    p.gpiod.otyper().modify(|_, w| w
-        .ot12().push_pull()
-        .ot13().push_pull()
-        .ot14().push_pull()
-        .ot15().push_pull()
-    );
-    
-    // Настройка скорости - низкая
-    p.gpiod.ospeedr().modify(|_, w| w
-        .ospeedr12().low_speed()
-        .ospeedr13().low_speed()
-        .ospeedr14().low_speed()
-        .ospeedr15().low_speed()
-    );
-    
-    // Выключаем все светодиоды
-    set_all_leds(p, false);
+fn setup_usart(p: &Peripherals) {
+    // Enable USART2 clock
+    p.rcc.apb1enr().modify(|_, w| w.usart2en().set_bit());
+
+    p.usart2.brr().write(|w| unsafe {
+        w.div_mantissa().bits(0xc)
+        .div_fraction().bits(0x3)
+    });
+
+    // enable error interrupts
+    p.usart2.cr1().write(|w| {
+        w.ue().enabled()
+        .te().enabled()
+        .re().enabled()
+    });
 }
 
-// Функции для работы со светодиодами
-fn toggle_led(p: &pac::Peripherals, pin: u8) {
-    // Читаем текущее состояние светодиода
-    let current = p.gpiod.odr().read().bits() & (1 << pin) != 0;
+fn send_welcome_message_polling(p: &Peripherals) {
+    let message: &str = "\r\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r
+xxxxxxxx  xxxxxxxxxxxxxxxxxxxx  xxxxxxxxx\r
+xxxxxxxxxx  xxxxxxxxxxxxxxxxx  xxxxxxxxxx\r
+xxxxxx  xxx  xxxxxxxxxxxxxxx  xx   xxxxxx\r
+xxxxxxxx  xx  xxxxxxxxxxxxx  xx  xxxxxxxx\r
+xxxx  xxx   xxxxxxxxxxxxxxxxx  xxx  xxxxx\r
+xxxxxx    xxxx  xxxxxxxx  xxx     xxxxxxx\r
+xxxxxxxx xxxxx xx      xx xxxx  xxxxxxxxx\r
+xxxx     xxxxx   xx  xx   xxxxx     xxxxx\r
+xxxxxxxx xxxxxxxxxx  xxxxxxxxxx  xxxxxxxx\r
+xxxxx    xxxxxx  xx  xx  xxxxxx    xxxxxx\r
+xxxxxxxx  xxxx xxxx  xxxx xxxxx xxxxxxxxx\r
+xxxxxxx    xxx  xxx  xxx  xxx    xxxxxxxx\r
+xxxxxxxxxx   xxxxxx  xxxxxx   xxxxxxxxxxx\r
+xxxxxxxxxxxxxx             xxxxxxxxxxxxxx\r
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r
+                   \r\n\r\nPress 'U' to enter updater\r\n\
+                   Press 'Enter' to boot application\r\n\
+                   Will boot automatically in 10 seconds...\r\n";
     
-    if current {
-        // Выключаем светодиод
-        p.gpiod.bsrr().write(|w| unsafe { w.bits(1 << (pin + 16)) });
-    } else {
-        // Включаем светодиод
-        p.gpiod.bsrr().write(|w| unsafe { w.bits(1 << pin) });
+    for byte in message.bytes() {
+        while p.usart2.sr().read().txe().bit_is_clear() {
+            // wait TX empty
+        }
+        
+        // send byte
+        p.usart2.dr().write(|w| unsafe { w.bits(byte as u16) });
+    }
+    
+    while p.usart2.sr().read().tc().bit_is_clear() {
+        // wait TC
     }
 }
 
-fn set_led(p: &pac::Peripherals, pin: u8, state: bool) {
-    if state {
-        // Включаем светодиод
-        p.gpiod.bsrr().write(|w| unsafe { w.bits(1 << pin) });
-    } else {
-        // Выключаем светодиод
-        p.gpiod.bsrr().write(|w| unsafe { w.bits(1 << (pin + 16)) });
-    }
-}
-
-fn set_all_leds(p: &pac::Peripherals, state: bool) {
-    for pin in 12..=15 {
-        set_led(p, pin, state);
-    }
-}
-
-fn error_blink(p: &pac::Peripherals, pin: u8) {
-    for _ in 0..10 {
-        set_led(p, pin, true);
-        delay(100_000);
-        set_led(p, pin, false);
-        delay(100_000);
-    }
-}
-
-fn error_blink_dual(p: &pac::Peripherals, pin1: u8, pin2: u8) {
-    for _ in 0..10 {
-        set_led(p, pin1, true);
-        set_led(p, pin2, true);
-        delay(100_000);
-        set_led(p, pin1, false);
-        set_led(p, pin2, false);
-        delay(100_000);
-    }
-}
-
-fn success_pattern(p: &pac::Peripherals) {
-    // Последовательно проходим по всем светодиодам 3 раза
-    for _ in 0..3 {
-        for pin in 12..=15 {
-            set_led(p, pin, true);
-            delay(200_000);
-            set_led(p, pin, false);
-            delay(50_000);
+fn ensure_transmitting() {
+    if !TX_IN_PROGRESS.load(Ordering::SeqCst) {
+        // Check if there is any data that can be transferred
+        if let Some(byte) = TX_BUFFER.get(|buf| buf.read()) {
+            USART2_PTR.get(|usart_opt| {
+                if let Some(ref usart_ptr) = *usart_opt {
+                    unsafe {
+                        // get USART2
+                        let usart2: &stm32f4::usart1::RegisterBlock = &*(usart_ptr.0 as *const pac::usart1::RegisterBlock);
+                        
+                        // Write to DR will fix TXE
+                        usart2.dr().write(|w| w.bits(byte as u16));
+                        
+                        // Enable TXE interrupt
+                        usart2.cr1().modify(|_, w| w.txeie().enabled());
+                        
+                        TX_IN_PROGRESS.store(true, Ordering::SeqCst);
+                    }
+                }
+            });
         }
     }
+}
+
+fn queue_string(s: &str) {
+    TX_BUFFER.get(|buf: &mut RingBuffer| {
+        for byte in s.bytes() {
+            buf.write(byte);
+        }
+    });
     
-    // Затем включаем и выключаем все светодиоды одновременно
-    for _ in 0..3 {
-        set_all_leds(p, true);
-        delay(300_000);
-        set_all_leds(p, false);
-        delay(300_000);
+    ensure_transmitting();
+}
+
+fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
+    let is_app_valid: bool = unsafe {
+        *(SLOT_2_VER_ADDR as *const u32) != 0xFFFFFFFF
+    };
+
+    if !is_app_valid {
+        queue_string("\r\nValid application not found!\r\n");
+        
+        while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+            ensure_transmitting();
+        }
+        
+        loop {
+            asm::nop();
+        }
+    }
+
+    let reset_addr: u32 = SLOT_2_APP_ADDR + 4;
+    let stack_addr: u32 = unsafe {
+        *(SLOT_2_APP_ADDR as *const u32)
+    };
+    let reset_vector: u32 = unsafe {
+        *(reset_addr as *const u32)
+    };
+
+    // Reset clock
+    p.rcc.cr().modify(|_, w| w.hsion().set_bit());
+    while p.rcc.cr().read().hsirdy().bit_is_clear() {
+        // wait
+    }
+
+    // Set HSITRIM[4:0] bits to the reset value
+    p.rcc.cr().modify(|_, w| unsafe {
+        w.hsitrim().bits(0x10)
+    });
+
+    p.rcc.cfgr().reset();
+    while !p.rcc.cfgr().read().sws().is_hsi() {
+        // wait
+    }
+
+    p.rcc.cr().modify(|_, w| w
+        .hseon().clear_bit()
+        .hsebyp().clear_bit()
+        .csson().clear_bit()
+    );
+    while p.rcc.cr().read().hserdy().bit_is_set() {
+        // wait
+    }
+
+    //reset PLL
+    p.rcc.cr().modify(|_, w| w.pllon().clear_bit());
+    while p.rcc.cr().read().pllrdy().bit_is_set() {
+        // wait
+    }
+
+    // reset PLL configuration
+    p.rcc.pllcfgr().modify(|_, w| unsafe {
+        w.pllm().bits(0x10)
+        .plln().bits(0x040)
+        .pllp().bits(0x080)
+        .pllq().bits(0x4)
+    });
+
+    // disable all interrupts
+    p.rcc.cir().modify(|_, w| w
+        .lsirdyie().clear_bit()
+        .lserdyie().clear_bit()
+        .hsirdyie().clear_bit()
+        .pllrdyie().clear_bit()
+    );
+    p.rcc.cir().modify(|_, w| w
+        .lsirdyc().clear_bit()
+        .lserdyc().clear_bit()
+        .hsirdyc().clear_bit()
+        .pllrdyc().clear_bit()
+    );
+
+    // reset all CSR flags
+    p.rcc.csr().modify(|_, w| w.rmvf().set_bit());
+
+    // force reset for all peripherals
+    p.rcc.apb1rstr().write(|w| unsafe { w.bits(0xF6FEC9FF) });
+    p.rcc.apb1rstr().write(|w| unsafe { w.bits(0x0) });
+
+    p.rcc.apb2rstr().write(|w| unsafe { w.bits(0x04777933) });
+    p.rcc.apb2rstr().write(|w| unsafe { w.bits(0x0) });
+
+    p.rcc.ahb1rstr().write(|w| unsafe { w.bits(0x226011FF) });
+    p.rcc.ahb1rstr().write(|w| unsafe { w.bits(0x0) });
+
+    p.rcc.ahb2rstr().write(|w| unsafe { w.bits(0x000000C1) });
+    p.rcc.ahb2rstr().write(|w| unsafe { w.bits(0x0) });
+
+    p.rcc.ahb3rstr().write(|w| unsafe { w.bits(0x00000001) });
+    p.rcc.ahb3rstr().write(|w| unsafe { w.bits(0x0) });
+
+    // remap
+    p.rcc.apb2enr().modify(|_, w| w.syscfgen().set_bit());
+    p.syscfg.memrmp().write(|w| unsafe {
+        w.bits(0x01)
+    });
+
+    // disable SysTick
+    let mut cp: cortex_m::Peripherals = unsafe {
+        cortex_m::Peripherals::steal()
+    };
+    cp.SYST.disable_counter();
+    cp.SYST.disable_interrupt();
+
+    unsafe {
+        let scb: *const peripheral::scb::RegisterBlock = SCB::ptr();
+
+        let icsr: u32 = (*scb).icsr.read();
+        (*scb).icsr.write(icsr | (1 << 25));
+
+        (*scb).shcsr.modify(|v: u32| v & !(
+            (1 << 18) | (1 << 17) | (1 << 16)
+        ));
+
+        (*scb).vtor.write(SLOT_2_APP_ADDR);
+
+        // change SP
+        core::arch::asm!("MSR msp, {0}", in(reg) stack_addr);
+
+        let jump_fn: extern "C" fn() -> ! = core::mem::transmute(reset_vector);
+        jump_fn();
     }
 }
 
-fn delay(cycles: u32) {
-    for _ in 0..cycles {
-        cortex_m::asm::nop();
+fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
+
+    let reset_addr: u32 = UPDATER_ADDR + 4;
+    let stack_addr: u32 = unsafe {
+        *(UPDATER_ADDR as *const u32)
+    };
+    let reset_vector: u32 = unsafe {
+        *(reset_addr as *const u32)
+    };
+
+    p.rcc.cr().modify(|_, w| w.hsion().set_bit());
+    while p.rcc.cr().read().hsirdy().bit_is_clear() {
+        // wait
+    }
+
+    // set hsitrim to reset value
+    p.rcc.cr().modify(|_, w| unsafe {
+        w.hsitrim().bits(0x10)
+    });
+
+    p.rcc.cfgr().reset();
+    while !p.rcc.cfgr().read().sws().is_hsi() {
+        asm::nop();
+    }
+
+    p.rcc.cr().modify(|_, w| w
+        .hseon().clear_bit()
+        .hsebyp().clear_bit()
+        .csson().clear_bit()
+    );
+    while p.rcc.cr().read().hserdy().bit_is_set() {
+        asm::nop();
+    }
+
+    // reset PLL configuration
+    p.rcc.pllcfgr().modify(|_, w| unsafe {
+        w.pllm().bits(0x10)
+        .plln().bits(0x040)
+        .pllp().bits(0x080)
+        .pllq().bits(0x4)
+    });
+
+    // disable all interrupts
+    p.rcc.cir().modify(|_, w| w
+        .lsirdyie().clear_bit()
+        .lserdyie().clear_bit()
+        .hsirdyie().clear_bit()
+        .pllrdyie().clear_bit()
+    );
+    p.rcc.cir().modify(|_, w| w
+        .lsirdyc().clear_bit()
+        .lserdyc().clear_bit()
+        .hsirdyc().clear_bit()
+        .pllrdyc().clear_bit()
+    );
+
+    // reset all CSR flags
+    p.rcc.csr().modify(|_, w| w.rmvf().set_bit());
+
+    // force reset for all peripherals
+    p.rcc.apb1rstr().write(|w| unsafe { w.bits(0xF6FEC9FF) });
+    p.rcc.apb1rstr().write(|w| unsafe { w.bits(0x0) });
+
+    p.rcc.apb2rstr().write(|w| unsafe { w.bits(0x04777933) });
+    p.rcc.apb2rstr().write(|w| unsafe { w.bits(0x0) });
+
+    p.rcc.ahb1rstr().write(|w| unsafe { w.bits(0x226011FF) });
+    p.rcc.ahb1rstr().write(|w| unsafe { w.bits(0x0) });
+
+    p.rcc.ahb2rstr().write(|w| unsafe { w.bits(0x000000C1) });
+    p.rcc.ahb2rstr().write(|w| unsafe { w.bits(0x0) });
+
+    p.rcc.ahb3rstr().write(|w| unsafe { w.bits(0x00000001) });
+    p.rcc.ahb3rstr().write(|w| unsafe { w.bits(0x0) });
+
+    // remap
+    p.rcc.apb2enr().modify(|_, w| w.syscfgen().set_bit());
+    p.syscfg.memrmp().write(|w| unsafe {
+        w.bits(0x01)
+    });
+
+    // disable SysTick
+    let mut cp: cortex_m::Peripherals = unsafe {
+        cortex_m::Peripherals::steal()
+    };
+    cp.SYST.disable_counter();
+    cp.SYST.disable_interrupt();
+
+    // disable all pending interrupts
+    unsafe {
+        let scb: *const peripheral::scb::RegisterBlock = SCB::ptr();
+
+        let icsr: u32 = (*scb).icsr.read();
+        (*scb).icsr.write(icsr | (1 << 25));
+
+        (*scb).shcsr.modify(|v: u32| v & !(
+            (1 << 18) | (1 << 17) | (1 << 16)
+        ));
+
+        (*scb).vtor.write(UPDATER_ADDR);
+
+        // change SP
+        core::arch::asm!("MSR msp, {0}", in(reg) stack_addr);
+
+        let jump_fn: extern "C" fn() -> ! = core::mem::transmute(reset_vector);
+        jump_fn();
     }
 }
 
-fn halt() -> ! {
+fn process_input() {
+    if let Some(byte) = RX_BUFFER.get(|buf: &mut RingBuffer| buf.read()) {
+        match byte {
+            b'U' | b'u' => {
+                queue_string("\r\nBooting to updater...\r\n");
+                LOAD_APPLICATION.store(false, Ordering::SeqCst);
+
+                while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+                    ensure_transmitting();
+                }
+
+                let p: Peripherals = unsafe {pac::Peripherals::steal()};
+                let mut cp: cortex_m::Peripherals = unsafe {cortex_m::Peripherals::steal()};
+                boot_updater(&p, &mut cp)
+            },
+
+            b'\r' | b'\n' => {
+
+                let is_app_valid: bool = unsafe { *(SLOT_2_VER_ADDR as *const u32) != 0xFFFFFFFF };
+                
+                if !is_app_valid {
+                    queue_string("\r\nValid application not found!\r\n");
+                } else {
+                    queue_string("\r\nBooting application...\r\n");
+                    LOAD_APPLICATION.store(true, Ordering::SeqCst);
+                    
+                    while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+                        ensure_transmitting();
+                    }
+                }
+            },
+
+            _ => {
+                queue_string("\r\nPress 'U' for updater, 'Enter' for application\r\n");
+            },
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn USART2() {
+    USART2_PTR.get(|usart_opt: &mut Option<PeripheralPtr<stm32f4::usart1::RegisterBlock>>| {
+        if let Some(ref usart_ptr) = *usart_opt {
+            unsafe {
+                let usart2 = &*(usart_ptr.0 as *const pac::usart2::RegisterBlock);
+
+                // check data in RX buffer
+                if usart2.sr().read().rxne().bit_is_set() {
+                    let data = usart2.dr().read().bits() as u8;
+                    RX_BUFFER.get(|buf: &mut RingBuffer| {buf.write(data);
+                    });
+                }
+
+                // check if we can TX
+                if usart2.sr().read().txe().bit_is_set() && usart2.cr1().read().txeie().bit_is_set() {
+                    TX_IN_PROGRESS.store(false, Ordering::SeqCst);
+
+                    if let Some(byte) = TX_BUFFER.get(|buf| buf.read()) {
+                        usart2.dr().write(|w| unsafe {
+                            w.bits(byte as u16)
+                        });
+                        TX_IN_PROGRESS.store(true, Ordering::SeqCst);
+                    } else {
+                        // disable TXE because no data left
+                        usart2.cr1().modify(|_, w| w.txeie().disabled());
+                    }
+                }
+            }
+        }
+    })
+}
+
+#[exception]
+fn SysTick() {
+    let current: u32 = TICK_MS.load(Ordering::Relaxed);
+    TICK_MS.store(current + 1, Ordering::Relaxed);
+}
+
+#[exception]
+unsafe fn HardFault(info: &cortex_m_rt::ExceptionFrame) -> ! {
     loop {
-        cortex_m::asm::nop();
+        asm::nop();
+    }
+}
+
+#[exception]
+unsafe fn DefaultHandler(irqn: i16) {
+    loop {
+        asm::nop();
     }
 }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     loop {
-        cortex_m::asm::nop();
+        asm::nop();
     }
 }

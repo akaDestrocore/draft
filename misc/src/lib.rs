@@ -6,6 +6,7 @@ pub mod xmodem;
 pub mod image;
 pub mod flash;
 pub mod crypto;
+pub mod systick;
 
 pub use ring_buffer::RingBuffer;
 pub use xmodem::{
@@ -14,4 +15,5 @@ pub use xmodem::{
     SLOT_2_APP_ADDR, SLOT_2_VER_ADDR, UPDATER_ADDR, PATCH_ADDR, BACKUP_ADDR
 };
 
+pub use systick::{get_tick_ms, wait_ms, setup_systick, increment_tick};
 pub use crypto::SimpleCrypto;

@@ -2,8 +2,9 @@
 
 use core::ptr;
 use stm32f4 as pac;
+use crate::systick;
 
-/// Flash sector sizes in kilobytes
+// Flash sector sizes in kilobytes
 const FLASH_SECTORS: [u32; 12] = [
     16,   // sector 0
     16,   // sector 1
@@ -19,13 +20,12 @@ const FLASH_SECTORS: [u32; 12] = [
     128,  // sector 11
 ];
 
-/// Base address of flash memory
+// Base address of flash memory
 pub const FLASH_BASE: u32 = 0x08000000;
 
-/// Total number of flash sectors
 pub const FLASH_SECTOR_TOTAL: u8 = 12;
 
-/// Unlocks the flash control register
+// Unlocks the flash control register
 pub fn unlock(p: &pac::Peripherals) -> bool {
     // Check if already unlocked
     if p.flash.cr().read().lock().is_unlocked() {
@@ -38,27 +38,53 @@ pub fn unlock(p: &pac::Peripherals) -> bool {
         p.flash.keyr().write(|w| w.key().set(0xCDEF89AB));
     }
 
+    let start_ms: u32 = systick::get_tick_ms();
+    while !systick::wait_ms(start_ms, 1) {
+        cortex_m::asm::nop();
+    }
+
     // Verify unlock was successful
     p.flash.cr().read().lock().is_unlocked()
 }
 
-/// Locks the flash control register
+// Locks the flash control register
 pub fn lock(p: &pac::Peripherals) {
     p.flash.cr().modify(|_, w| w.lock().locked());
+    
+    let start_ms: u32 = systick::get_tick_ms();
+    while !systick::wait_ms(start_ms, 1) {
+        cortex_m::asm::nop();
+    }
 }
 
-/// Waits for the last flash operation to complete and checks for errors
+// Wait for the last flash operation to complete
 pub fn wait_for_last_operation(p: &pac::Peripherals) -> bool {
-    // Wait for busy flag to clear
-    let mut timeout = 50000;
+    // Clear any existing error flags first
+    p.flash.sr().modify(|_, w| w
+        .pgserr().clear()
+        .pgperr().clear()
+        .pgaerr().clear()
+        .wrperr().clear()
+        .operr().clear()
+    );
+
+    // Wait for busy flag to clear with timeout
+    let start_ms: u32 = systick::get_tick_ms();
+    let timeout_ms: u32 = 1000;
+    
     while p.flash.sr().read().bsy().is_busy() {
-        timeout -= 1;
-        if timeout == 0 {
+        if systick::wait_ms(start_ms, timeout_ms) {
+            // timeout
             return false;
         }
+        cortex_m::asm::wfi();
     }
 
-    // Check for errors
+    let start_ms: u32 = systick::get_tick_ms();
+    while !systick::wait_ms(start_ms, 5) {
+        cortex_m::asm::nop();
+    }
+
     let sr = p.flash.sr().read();
     
     // Check all possible error flags
@@ -83,14 +109,14 @@ pub fn wait_for_last_operation(p: &pac::Peripherals) -> bool {
     true
 }
 
-/// Finds the sector number corresponding to the given address
+// Find the sector number corresponding to the given address
 pub fn get_sector_number(address: u32) -> Option<u8> {
     if address < FLASH_BASE {
         return None;
     }
     
-    let offset = address - FLASH_BASE;
-    let mut current_offset = 0;
+    let offset: u32 = address - FLASH_BASE;
+    let mut current_offset: u32 = 0;
     
     for (i, &size) in FLASH_SECTORS.iter().enumerate() {
         let sector_size = size * 1024;
@@ -104,13 +130,13 @@ pub fn get_sector_number(address: u32) -> Option<u8> {
 }
 
 pub fn erase_sector(p: &pac::Peripherals, destination: u32) -> u32 {
-    // Check for existing flash errors
-    if p.flash.sr().read().bsy().is_busy() || !wait_for_last_operation(p) {
+    // Clear any existing errors and check if Flash is ready
+    if !wait_for_last_operation(p) {
         return 0;
     }
 
     // Find sector number for the address
-    let sector = match get_sector_number(destination) {
+    let sector: u8 = match get_sector_number(destination) {
         Some(s) => s,
         None => return 0,
     };
@@ -120,19 +146,47 @@ pub fn erase_sector(p: &pac::Peripherals, destination: u32) -> u32 {
         return 0;
     }
 
-    // Configure sector erase - ADD PSIZE HERE
+    let start_ms: u32 = systick::get_tick_ms();
+    while !systick::wait_ms(start_ms, 5) {
+        cortex_m::asm::nop();
+    }
+
+    // Configure sector erase with correct PSIZE
     unsafe {
+        // First reset all bits we're going to modify
+        p.flash.cr().modify(|_, w| w
+            .psize().bits(0)
+            .ser().clear_bit()
+            .snb().bits(0)
+        );
+        
+        let start_ms: u32 = systick::get_tick_ms();
+        while !systick::wait_ms(start_ms, 1) {
+            cortex_m::asm::nop();
+        }
+        
+        // Set all the parameters properly
         p.flash.cr().modify(|_, w| w
             .psize().psize32()  // Set 32-bit PSIZE for 2.7V-3.6V
             .ser().sector_erase()
             .snb().bits(sector)
         );
 
+        let start_ms: u32 = systick::get_tick_ms();
+        while !systick::wait_ms(start_ms, 1) {
+            cortex_m::asm::nop();
+        }
+
         // Start the erase operation
         p.flash.cr().modify(|_, w| w.strt().start());
     }
 
-    // Wait for operation to complete
+    let start_ms: u32 = systick::get_tick_ms();
+    while !systick::wait_ms(start_ms, 10) {
+        cortex_m::asm::nop();
+    }
+
+    // Wait for operation to complete with longer timeout
     if !wait_for_last_operation(p) {
         // Clear SER bit
         p.flash.cr().modify(|_, w| w.ser().clear_bit());
@@ -143,6 +197,11 @@ pub fn erase_sector(p: &pac::Peripherals, destination: u32) -> u32 {
     // Clear SER bit
     p.flash.cr().modify(|_, w| w.ser().clear_bit());
     
+    let start_ms: u32 = systick::get_tick_ms();
+    while !systick::wait_ms(start_ms, 5) {
+        cortex_m::asm::nop();
+    }
+    
     // Lock flash
     lock(p);
 
@@ -150,7 +209,7 @@ pub fn erase_sector(p: &pac::Peripherals, destination: u32) -> u32 {
     FLASH_SECTORS[sector as usize] * 1024
 }
 
-/// Erases all flash sectors starting from the given address
+// Erase all flash sectors starting from the given address
 pub fn erase(p: &pac::Peripherals, destination: u32) -> bool {
     // Check for existing flash errors
     if !wait_for_last_operation(p) {
@@ -158,7 +217,7 @@ pub fn erase(p: &pac::Peripherals, destination: u32) -> bool {
     }
 
     // Find sector number for the address
-    let start_sector = match get_sector_number(destination) {
+    let start_sector: u8 = match get_sector_number(destination) {
         Some(s) => s,
         None => return false,
     };
@@ -168,17 +227,45 @@ pub fn erase(p: &pac::Peripherals, destination: u32) -> bool {
         return false;
     }
 
-    // Erase each sector from start_sector to the end
+    let start_ms: u32 = systick::get_tick_ms();
+    while !systick::wait_ms(start_ms, 5) {
+        cortex_m::asm::nop();
+    }
+
     for sector in start_sector..FLASH_SECTOR_TOTAL {
         // Configure sector erase
         unsafe {
+            // Reset CR fields first
             p.flash.cr().modify(|_, w| w
+                .psize().bits(0)
+                .ser().clear_bit()
+                .snb().bits(0)
+            );
+            
+            let start_ms: u32 = systick::get_tick_ms();
+            while !systick::wait_ms(start_ms, 1) {
+                cortex_m::asm::nop();
+            }
+            
+            // Set proper values
+            p.flash.cr().modify(|_, w| w
+                .psize().psize32()  // Set 32-bit PSIZE
                 .ser().sector_erase()
                 .snb().bits(sector)
             );
 
+            let start_ms: u32 = systick::get_tick_ms();
+            while !systick::wait_ms(start_ms, 1) {
+                cortex_m::asm::nop();
+            }
+
             // Start the erase operation
             p.flash.cr().modify(|_, w| w.strt().start());
+        }
+
+        let start_ms: u32 = systick::get_tick_ms();
+        while !systick::wait_ms(start_ms, 10) {
+            cortex_m::asm::nop();
         }
 
         // Wait for operation to complete
@@ -191,6 +278,11 @@ pub fn erase(p: &pac::Peripherals, destination: u32) -> bool {
 
         // Clear SER bit
         p.flash.cr().modify(|_, w| w.ser().clear_bit());
+        
+        let start_ms: u32 = systick::get_tick_ms();
+        while !systick::wait_ms(start_ms, 5) {
+            cortex_m::asm::nop();
+        }
     }
 
     // Lock flash
@@ -199,19 +291,20 @@ pub fn erase(p: &pac::Peripherals, destination: u32) -> bool {
     true
 }
 
-/// Writes data to flash at the given address
-/// Returns 0 on success, error code otherwise
 pub fn write(p: &pac::Peripherals, source_data: &[u8], destination: u32) -> u8 {
     if source_data.is_empty() {
         return 0;
     }
 
-    // Для STM32F4 при напряжении 2.7V-3.6V используем 32-bit доступ
-    let block_size = 4; // 32-bit
+    let block_size: i32 = 4; // 32-bit
 
-    // Проверяем, что длина данных кратна размеру блока
     if source_data.len() % block_size as usize != 0 {
         return 2;
+    }
+
+    // Check for existing errors
+    if !wait_for_last_operation(p) {
+        return 3;
     }
 
     // Unlock flash
@@ -219,18 +312,36 @@ pub fn write(p: &pac::Peripherals, source_data: &[u8], destination: u32) -> u8 {
         return 1;
     }
 
-    // Используем программирование 32-bit словами
-    unsafe {
-        p.flash.cr().modify(|_, w| w
-            .psize().bits(2) // 2 = 32-bit для напряжения 2.7V-3.6V
-        );
+    let start_ms: u32 = systick::get_tick_ms();
+    while !systick::wait_ms(start_ms, 5) {
+        cortex_m::asm::nop();
     }
 
-    // Программируем данные блоками
-    for i in (0..source_data.len()).step_by(block_size as usize) {
-        let addr = destination + i as u32;
+    // Reset CR register first
+    unsafe {
+        p.flash.cr().modify(|_, w| w
+            .pg().clear_bit()
+            .psize().bits(0)
+        );
         
-        // Конструируем 32-bit слово из байтов
+        let start_ms: u32 = systick::get_tick_ms();
+        while !systick::wait_ms(start_ms, 1) {
+            cortex_m::asm::nop();
+        }
+    }
+
+    p.flash.cr().modify(|_, w| w
+        .psize().psize32() // 2 = 32-bit for 2.7V-3.6V
+    );
+
+    let start_ms: u32 = systick::get_tick_ms();
+    while !systick::wait_ms(start_ms, 1) {
+        cortex_m::asm::nop();
+    }
+
+    for i in (0..source_data.len()).step_by(block_size as usize) {
+        let addr: u32 = destination + i as u32;
+        
         let mut data: u32 = 0;
         for j in 0..block_size {
             if i + (j as usize) < source_data.len() {
@@ -238,36 +349,59 @@ pub fn write(p: &pac::Peripherals, source_data: &[u8], destination: u32) -> u8 {
             }
         }
 
-        // Активируем режим программирования
         p.flash.cr().modify(|_, w| w.pg().program());
 
-        // Запись данных во флеш
+        let start_ms: u32 = systick::get_tick_ms();
+        while !systick::wait_ms(start_ms, 1) {
+            cortex_m::asm::nop();
+        }
+
         unsafe { 
             ptr::write_volatile(addr as *mut u32, data);
         }
+        
+        let start_ms: u32 = systick::get_tick_ms();
+        while !systick::wait_ms(start_ms, 1) {
+            cortex_m::asm::nop();
+        }
 
-        // Ждем завершения операции
         if !wait_for_last_operation(p) {
             p.flash.cr().modify(|_, w| w.pg().clear_bit());
             lock(p);
-            return 1;
+            return 4;
+        }
+        
+        // Clear PG bit between writes
+        p.flash.cr().modify(|_, w| w.pg().clear_bit());
+
+        let start_ms: u32 = systick::get_tick_ms();
+        while !systick::wait_ms(start_ms, 1) {
+            cortex_m::asm::nop();
         }
     }
-
-    // Сбрасываем бит программирования
-    p.flash.cr().modify(|_, w| w.pg().clear_bit());
     
-    // Блокируем флеш-контроллер
+    // Lock flash
     lock(p);
     
     0 // Успех
 }
 
-/// Reads data from flash into the provided buffer
+// Read data from flash into the provided buffer
 pub fn read(source: u32, destination: &mut [u8]) {
+
+    let start_ms: u32 = systick::get_tick_ms();
+    while !systick::wait_ms(start_ms, 1) {
+        cortex_m::asm::nop();
+    }
+    
     for (i, byte) in destination.iter_mut().enumerate() {
         unsafe {
             *byte = ptr::read_volatile((source + i as u32) as *const u8);
         }
+    }
+    
+    let start_ms: u32 = systick::get_tick_ms();
+    while !systick::wait_ms(start_ms, 1) {
+        cortex_m::asm::nop();
     }
 }
