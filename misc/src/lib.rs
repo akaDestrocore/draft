@@ -9,9 +9,9 @@ pub mod crypto;
 
 pub use ring_buffer::RingBuffer;
 pub use xmodem::{
-    XmodemReceiver, XmodemError, XmodemState, UpdateType, FlashOperations, CryptoOperations,
+    XmodemReceiver, XmodemError, XmodemState, FlashOperations, CryptoOperations,
     X_SOH, X_STX, X_EOT, X_ACK, X_NAK, X_CAN, X_C,
     SLOT_2_APP_ADDR, SLOT_2_VER_ADDR, UPDATER_ADDR, PATCH_ADDR, BACKUP_ADDR
 };
-pub use flash::Stm32f4Flash;
+pub use flash::UpdaterFlash;
 pub use crypto::SimpleCrypto;
