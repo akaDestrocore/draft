@@ -19,7 +19,7 @@
             "armToolchainPath": "${config:STM32VSCodeExtension.cubeCLT.path}/GNU-tools-for-STM32/bin",
             "gdbPath": "${config:STM32VSCodeExtension.cubeCLT.path}/GNU-tools-for-STM32/bin/arm-none-eabi-gdb",
             "serverArgs": ["-m", "0"],
-            // "preLaunchTask": "Build Boot Debug"
+            "preLaunchTask": "Build Boot Debug"
         },
         {
             "name": "Debug Loader",
@@ -38,7 +38,7 @@
                 "monitor halt",
                 "set {unsigned int}0xE000ED08 = 0x08004000"
             ],
-            // "preLaunchTask": "Build Loader Debug"
+            "preLaunchTask": "Build Loader Debug"
         },
         {
             "name": "Debug Updater",

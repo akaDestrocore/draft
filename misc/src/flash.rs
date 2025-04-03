@@ -61,14 +61,15 @@ pub fn wait_for_last_operation(p: &pac::Peripherals) -> bool {
     // Check for errors
     let sr = p.flash.sr().read();
     
+    // Check all possible error flags
     if sr.pgserr().is_active() || 
        sr.pgperr().is_active() || 
        sr.pgaerr().is_active() || 
        sr.wrperr().is_active() || 
        sr.operr().is_active() {
         
-        // Clear error flags
-        p.flash.sr().write(|w| w
+        // Clear error flags by writing 1 to them
+        p.flash.sr().modify(|_, w| w
             .pgserr().clear()
             .pgperr().clear()
             .pgaerr().clear()
@@ -84,15 +85,19 @@ pub fn wait_for_last_operation(p: &pac::Peripherals) -> bool {
 
 /// Finds the sector number corresponding to the given address
 pub fn get_sector_number(address: u32) -> Option<u8> {
-    let mut addr = FLASH_BASE;
+    if address < FLASH_BASE {
+        return None;
+    }
+    
+    let offset = address - FLASH_BASE;
+    let mut current_offset = 0;
     
     for (i, &size) in FLASH_SECTORS.iter().enumerate() {
-        if addr == address {
+        let sector_size = size * 1024;
+        if offset >= current_offset && offset < current_offset + sector_size {
             return Some(i as u8);
-        } else if addr > address {
-            return None;
         }
-        addr += size * 1024;
+        current_offset += sector_size;
     }
     
     None
@@ -147,21 +152,21 @@ pub fn erase_sector(p: &pac::Peripherals, destination: u32) -> u32 {
 }
 
 /// Erases all flash sectors starting from the given address
-pub fn erase(p: &pac::Peripherals, destination: u32) {
+pub fn erase(p: &pac::Peripherals, destination: u32) -> bool {
     // Check for existing flash errors
     if !wait_for_last_operation(p) {
-        return;
+        return false;
     }
 
     // Find sector number for the address
     let start_sector = match get_sector_number(destination) {
         Some(s) => s,
-        None => return,
+        None => return false,
     };
 
     // Unlock flash
     if !unlock(p) {
-        return;
+        return false;
     }
 
     // Erase each sector from start_sector to the end
@@ -182,7 +187,7 @@ pub fn erase(p: &pac::Peripherals, destination: u32) {
             // Clear SER bit and exit on error
             p.flash.cr().modify(|_, w| w.ser().clear_bit());
             lock(p);
-            return;
+            return false;
         }
 
         // Clear SER bit
@@ -191,6 +196,8 @@ pub fn erase(p: &pac::Peripherals, destination: u32) {
 
     // Lock flash
     lock(p);
+    
+    true
 }
 
 /// Writes data to flash at the given address
@@ -200,17 +207,10 @@ pub fn write(p: &pac::Peripherals, source_data: &[u8], destination: u32) -> u8 {
         return 0;
     }
 
-    // Determine program size from CR register
-    let psize_bits = p.flash.cr().read().psize().bits();
-    let block_size = match psize_bits {
-        0 => 1, // 8-bit
-        1 => 2, // 16-bit
-        2 => 4, // 32-bit
-        3 => 8, // 64-bit
-        _ => return 1,
-    };
+    // Для STM32F4 при напряжении 2.7V-3.6V используем 32-bit доступ
+    let block_size = 4; // 32-bit
 
-    // Check if data length is a multiple of block size
+    // Проверяем, что длина данных кратна размеру блока
     if source_data.len() % block_size as usize != 0 {
         return 2;
     }
@@ -220,11 +220,18 @@ pub fn write(p: &pac::Peripherals, source_data: &[u8], destination: u32) -> u8 {
         return 1;
     }
 
-    // Program data in block_size chunks
+    // Используем программирование 32-bit словами
+    unsafe {
+        p.flash.cr().modify(|_, w| w
+            .psize().bits(2) // 2 = 32-bit для напряжения 2.7V-3.6V
+        );
+    }
+
+    // Программируем данные блоками
     for i in (0..source_data.len()).step_by(block_size as usize) {
         let addr = destination + i as u32;
         
-        // Construct data word from bytes
+        // Конструируем 32-bit слово из байтов
         let mut data: u32 = 0;
         for j in 0..block_size {
             if i + (j as usize) < source_data.len() {
@@ -232,25 +239,15 @@ pub fn write(p: &pac::Peripherals, source_data: &[u8], destination: u32) -> u8 {
             }
         }
 
-        // Set programming mode
+        // Активируем режим программирования
         p.flash.cr().modify(|_, w| w.pg().program());
 
-        // Write data to flash
-        match block_size {
-            1 => unsafe { ptr::write_volatile(addr as *mut u8, data as u8) },
-            2 => unsafe { ptr::write_volatile(addr as *mut u16, data as u16) },
-            4 => unsafe { ptr::write_volatile(addr as *mut u32, data) },
-            8 => {
-                // 64-bit write would be split into two 32-bit writes
-                unsafe { 
-                    ptr::write_volatile(addr as *mut u32, data);
-                    ptr::write_volatile((addr + 4) as *mut u32, 0);
-                }
-            },
-            _ => {}
+        // Запись данных во флеш
+        unsafe { 
+            ptr::write_volatile(addr as *mut u32, data);
         }
 
-        // Wait for programming to complete
+        // Ждем завершения операции
         if !wait_for_last_operation(p) {
             p.flash.cr().modify(|_, w| w.pg().clear_bit());
             lock(p);
@@ -258,13 +255,13 @@ pub fn write(p: &pac::Peripherals, source_data: &[u8], destination: u32) -> u8 {
         }
     }
 
-    // Clear programming bit
+    // Сбрасываем бит программирования
     p.flash.cr().modify(|_, w| w.pg().clear_bit());
     
-    // Lock flash
+    // Блокируем флеш-контроллер
     lock(p);
     
-    0 // Success
+    0 // Успех
 }
 
 /// Reads data from flash into the provided buffer
