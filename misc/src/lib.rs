@@ -13,5 +13,5 @@ pub use xmodem::{
     X_SOH, X_STX, X_EOT, X_ACK, X_NAK, X_CAN, X_C,
     SLOT_2_APP_ADDR, SLOT_2_VER_ADDR, UPDATER_ADDR, PATCH_ADDR, BACKUP_ADDR
 };
-pub use flash::UpdaterFlash;
+
 pub use crypto::SimpleCrypto;

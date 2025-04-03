@@ -5,7 +5,22 @@ use core::panic::PanicInfo;
 use cortex_m::asm;
 use cortex_m_rt::entry;
 use stm32f4 as pac;
-use misc::flash::UpdaterFlash;
+use misc::{
+    flash,
+    image::{ImageHeader, SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER}
+};
+
+#[no_mangle]
+#[link_section = ".image_hdr"]
+pub static IMAGE_HEADER: ImageHeader = ImageHeader::new(
+    IMAGE_TYPE_LOADER,
+    IMAGE_MAGIC_LOADER,
+    1, 0, 0  // ver 1.0.0
+);
+
+#[no_mangle]
+#[link_section = ".shared_memory"]
+pub static mut SHARED_MEMORY: SharedMemory = SharedMemory::new();
 
 // Test address - beginning of sector 2 (0x08008000)
 const TEST_ADDR: u32 = 0x08008000;
@@ -16,16 +31,13 @@ const TEST_SIZE: usize = 1024; // 1KB of test data
 #[entry]
 fn main() -> ! {
     // Initialize peripherals
-    let peripherals = unsafe { pac::Peripherals::steal() };
+    let p = pac::Peripherals::take();
     
     // Setup system clock
-    setup_system_clock(&peripherals);
+    setup_system_clock(&p);
     
     // Configure LEDs for status indication
-    setup_leds(&peripherals);
-    
-    // Create flash module instance
-    let flash = UpdaterFlash::new(peripherals.flash);
+    setup_leds(&p);
     
     // Prepare test patterns
     let mut test_pattern1 = [0u8; TEST_SIZE];
@@ -50,79 +62,79 @@ fn main() -> ! {
     let mut read_buffer = [0u8; TEST_SIZE];
     
     // STEP 1: Erase the target sector
-    blink_led(&peripherals, 12); // Green LED
+    blink_led(&p, 12); // Green LED
     
-    let erase_result = flash.erase_sector(TEST_ADDR);
+    let erase_result = flash::erase_sector(&p, TEST_ADDR);
     if erase_result == 0 {
-        error_blink(&peripherals, 14); // Red LED
+        error_blink(&p, 14); // Red LED
         loop {}
     }
     
     // STEP 2: Write first test pattern
-    blink_led(&peripherals, 13); // Orange LED
+    blink_led(&p, 13); // Orange LED
     
-    let write_result = flash.write(&test_pattern1, TEST_ADDR);
+    let write_result = flash::write(&p, &test_pattern1, TEST_ADDR);
     if write_result != 0 {
-        error_blink(&peripherals, 14); // Red LED
+        error_blink(&p, 14); // Red LED
         loop {}
     }
     
     // STEP 3: Read back and verify first pattern
-    blink_led(&peripherals, 12); // Green LED
+    blink_led(&p, 12); // Green LED
     
-    flash.read(TEST_ADDR, &mut read_buffer);
+    flash::read(TEST_ADDR, &mut read_buffer);
     
     for i in 0..TEST_SIZE {
         if read_buffer[i] != test_pattern1[i] {
-            error_blink(&peripherals, 14); // Red LED
+            error_blink(&p, 14); // Red LED
             loop {}
         }
     }
     
     // STEP 4: Erase the sector again
-    blink_led(&peripherals, 13); // Orange LED
+    blink_led(&p, 13); // Orange LED
     
-    let erase_result = flash.erase_sector(TEST_ADDR);
+    let erase_result = flash::erase_sector(&p, TEST_ADDR);
     if erase_result == 0 {
-        error_blink(&peripherals, 14); // Red LED
+        error_blink(&p, 14); // Red LED
         loop {}
     }
     
     // STEP 5: Verify the sector is erased (all 0xFF)
-    blink_led(&peripherals, 12); // Green LED
+    blink_led(&p, 12); // Green LED
     
-    flash.read(TEST_ADDR, &mut read_buffer);
+    flash::read(TEST_ADDR, &mut read_buffer);
     
     for i in 0..TEST_SIZE {
         if read_buffer[i] != 0xFF {
-            error_blink(&peripherals, 14); // Red LED
+            error_blink(&p, 14); // Red LED
             loop {}
         }
     }
     
     // STEP 6: Write second test pattern
-    blink_led(&peripherals, 13); // Orange LED
+    blink_led(&p, 13); // Orange LED
     
-    let write_result = flash.write(&test_pattern2, TEST_ADDR);
+    let write_result = flash::write(&p, &test_pattern2, TEST_ADDR);
     if write_result != 0 {
-        error_blink(&peripherals, 14); // Red LED
+        error_blink(&p, 14); // Red LED
         loop {}
     }
     
     // STEP 7: Read back and verify second pattern
-    blink_led(&peripherals, 12); // Green LED
+    blink_led(&p, 12); // Green LED
     
-    flash.read(TEST_ADDR, &mut read_buffer);
+    flash::read(TEST_ADDR, &mut read_buffer);
     
     for i in 0..TEST_SIZE {
         if read_buffer[i] != test_pattern2[i] {
-            error_blink(&peripherals, 14); // Red LED
+            error_blink(&p, 14); // Red LED
             loop {}
         }
     }
     
     // All tests passed! Celebrate with LED pattern
-    success_pattern(&peripherals);
+    success_pattern(&p);
     
     loop {
         asm::nop();
