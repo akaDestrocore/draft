@@ -4,6 +4,8 @@
 pub mod ring_buffer;
 pub mod xmodem;
 pub mod image;
+pub mod flash;
+pub mod crypto;
 
 pub use ring_buffer::RingBuffer;
 pub use xmodem::{
@@ -11,3 +13,5 @@ pub use xmodem::{
     X_SOH, X_STX, X_EOT, X_ACK, X_NAK, X_CAN, X_C,
     SLOT_2_APP_ADDR, SLOT_2_VER_ADDR, UPDATER_ADDR, PATCH_ADDR, BACKUP_ADDR
 };
+pub use flash::Stm32f4Flash;
+pub use crypto::SimpleCrypto;

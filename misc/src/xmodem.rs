@@ -1,31 +1,22 @@
 #![no_std]
 
 use crate::ring_buffer::RingBuffer;
-use core::{cmp, convert::TryFrom, mem::size_of};
 use crate::image::{
     ImageHeader, 
-    IMAGE_MAGIC_LOADER, IMAGE_MAGIC_UPDATER, IMAGE_MAGIC_APP,
-    IMAGE_TYPE_LOADER, IMAGE_TYPE_UPDATER, IMAGE_TYPE_APP
+    IMAGE_MAGIC_APP, IMAGE_MAGIC_LOADER, IMAGE_MAGIC_UPDATER,
+    IMAGE_TYPE_APP, IMAGE_TYPE_LOADER, IMAGE_TYPE_UPDATER
 };
-
-// Исправленные импорты
-use aes_gcm::{
-    aead::{AeadInPlace, KeyInit},
-    AesGcm, Key, Nonce, Tag,
-};
-use aes::cipher::consts::U12;
-use aes::Aes128;
+use core::mem::size_of;
 
 // XMODEM constants
-pub const X_SOH: u8 = 0x01; // Start of 128-byte packet
-pub const X_STX: u8 = 0x02; // Start of 1024-byte packet
-pub const X_EOT: u8 = 0x04; // End of transmission
-pub const X_ACK: u8 = 0x06; // Acknowledge
-pub const X_NAK: u8 = 0x15; // Not acknowledge
-pub const X_CAN: u8 = 0x18; // Cancel
-pub const X_C: u8 = 0x43;   // ASCII 'C' - Request with CRC
+pub const X_SOH: u8 = 0x01;
+pub const X_STX: u8 = 0x02;
+pub const X_EOT: u8 = 0x04;
+pub const X_ACK: u8 = 0x06;
+pub const X_NAK: u8 = 0x15;
+pub const X_CAN: u8 = 0x18;
+pub const X_C: u8 = 0x43;
 
-// Memory constants
 pub const BUFFER_SIZE: usize = 2048;
 pub const PACKET_128_SIZE: usize = 128;
 pub const PACKET_1K_SIZE: usize = 1024;
@@ -48,16 +39,15 @@ pub const SLOT_1_APP_LOADER_ADDR: u32 = 0x08004000;
 /// XMODEM state machine states
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum XmodemState {
-    WaitHeaderByte,  // Waiting for SOH/STX
-    WaitIndex1,      // Waiting for packet index 
-    WaitIndex2,      // Waiting for complement of packet index
-    ReadData,        // Reading data bytes
-    WaitCRC1,        // Waiting for first CRC byte
-    WaitCRC2,        // Waiting for second CRC byte
-    ProcessPacket,   // Processing the complete packet
+    WaitHeaderByte,
+    WaitIndex1, 
+    WaitIndex2,
+    ReadData,
+    WaitCRC1,
+    WaitCRC2,
+    ProcessPacket,
 }
 
-/// Error types for XMODEM operations
 #[derive(Debug)]
 pub enum XmodemError {
     IndexError,             // Packet index error
@@ -71,7 +61,6 @@ pub enum XmodemError {
     UnexpectedEOT,          // Unexpected end of transmission
     InvalidPacketType,      // Invalid packet type received
     
-    // New error types for header verification
     InvalidImageType,       // Image type doesn't match expected
     InvalidMagic,           // Invalid magic number
     OlderVersion,           // Received version is not newer than installed
@@ -85,7 +74,6 @@ pub enum UpdateType {
     PatchUpdate,
 }
 
-/// Flash operation trait for abstraction
 pub trait FlashOperations {
     fn erase(&self, address: u32) -> Result<(), XmodemError>;
     fn write(&self, address: u32, data: &[u8]) -> Result<(), XmodemError>;
@@ -97,239 +85,6 @@ pub trait CryptoOperations {
     fn decrypt_chunk(&mut self, data: &[u8], output: &mut [u8]) -> Result<usize, XmodemError>;
     fn verify_tag(&mut self, expected_tag: &[u8]) -> Result<(), XmodemError>;
     fn finish_decryption(&mut self) -> Result<(), XmodemError>;
-    
-    fn init_encryption(&mut self, key: &[u8], nonce: &[u8], header: &[u8]) -> Result<(), XmodemError>;
-    fn encrypt_chunk(&mut self, data: &[u8], output: &mut [u8]) -> Result<usize, XmodemError>;
-    fn get_tag(&mut self, tag: &mut [u8]) -> Result<(), XmodemError>;
-    fn finish_encryption(&mut self) -> Result<(), XmodemError>;
-}
-
-/// AES-GCM Crypto implementation
-pub struct AesGcmCrypto {
-    cipher: Option<AesGcm<Aes128, U12>>,
-    buffer: [u8; BUFFER_SIZE],
-    buffer_len: usize,
-    nonce: [u8; NONCE_SIZE],
-    tag: [u8; AUTH_TAG_SIZE],
-    tag_calculated: bool,
-    encrypt_mode: bool,
-    key: [u8; 16],
-}
-
-impl AesGcmCrypto {
-    pub fn new() -> Self {
-        Self {
-            cipher: None,
-            buffer: [0; BUFFER_SIZE],
-            buffer_len: 0,
-            nonce: [0; NONCE_SIZE],
-            tag: [0; AUTH_TAG_SIZE],
-            tag_calculated: false,
-            encrypt_mode: false,
-            key: [0; 16],
-        }
-    }
-}
-
-impl CryptoOperations for AesGcmCrypto {
-    fn init_decryption(&mut self, key: &[u8], nonce: &[u8], header: &[u8]) -> Result<(), XmodemError> {
-        // Create a new cipher instance
-        let key_slice = Key::<AesGcm<Aes128, U12>>::from_slice(key);
-        self.cipher = Some(AesGcm::<Aes128, U12>::new(key_slice));
-        
-        // Store the key for our XOR fallback
-        if key.len() >= 16 {
-            self.key.copy_from_slice(&key[0..16]);
-        } else {
-            return Err(XmodemError::DecryptionError);
-        }
-        
-        // Copy the nonce
-        self.nonce.copy_from_slice(nonce);
-        
-        // Clear the internal buffer
-        self.buffer_len = 0;
-        
-        self.tag_calculated = false;
-        self.encrypt_mode = false;
-        
-        Ok(())
-    }
-    
-    fn decrypt_chunk(&mut self, data: &[u8], output: &mut [u8]) -> Result<usize, XmodemError> {
-        if self.cipher.is_none() {
-            return Err(XmodemError::DecryptionError);
-        }
-        
-        // Instead of incremental decryption, we buffer the data
-        let current_len = self.buffer_len;
-        let bytes_to_add = cmp::min(data.len(), BUFFER_SIZE - current_len);
-        
-        if bytes_to_add == 0 {
-            return Err(XmodemError::BufferOverflow);
-        }
-        
-        // Add data to buffer
-        for i in 0..bytes_to_add {
-            self.buffer[current_len + i] = data[i];
-        }
-        self.buffer_len += bytes_to_add;
-        
-        // If we have enough data to fill the output buffer, decrypt it
-        let bytes_to_decrypt = cmp::min(self.buffer_len, output.len());
-        if bytes_to_decrypt > 0 {
-            let nonce = Nonce::<U12>::from_slice(&self.nonce);
-            
-            // Prepare a copy of the data to decrypt
-            let mut to_decrypt = [0u8; PACKET_1K_SIZE];
-            to_decrypt[..bytes_to_decrypt].copy_from_slice(&self.buffer[..bytes_to_decrypt]);
-            
-            // For no_std environments, we can't use the direct decrypt_in_place method
-            // Instead, we'll implement a simple XOR-based decryption for now
-            // In a real implementation, you'd want to replace this with proper AES-GCM
-            
-            // Simple XOR with key (just as a placeholder)
-            for i in 0..bytes_to_decrypt {
-                to_decrypt[i] ^= self.key[i % 16];
-            }
-            
-            // Copy the result to the output buffer
-            output[..bytes_to_decrypt].copy_from_slice(&to_decrypt[..bytes_to_decrypt]);
-            
-            // Remove the processed data from the buffer
-            for i in 0..self.buffer_len - bytes_to_decrypt {
-                self.buffer[i] = self.buffer[i + bytes_to_decrypt];
-            }
-            self.buffer_len -= bytes_to_decrypt;
-            
-            Ok(bytes_to_decrypt)
-        } else {
-            Ok(0)
-        }
-    }
-    
-    fn verify_tag(&mut self, expected_tag: &[u8]) -> Result<(), XmodemError> {
-        if expected_tag.len() != AUTH_TAG_SIZE {
-            return Err(XmodemError::AuthenticationError);
-        }
-        
-        // Compare expected tag with calculated tag
-        for i in 0..AUTH_TAG_SIZE {
-            if expected_tag[i] != self.tag[i] {
-                return Err(XmodemError::AuthenticationError);
-            }
-        }
-        
-        Ok(())
-    }
-    
-    fn finish_decryption(&mut self) -> Result<(), XmodemError> {
-        self.cipher = None;
-        self.buffer_len = 0;
-        self.tag_calculated = false;
-        
-        Ok(())
-    }
-    
-    fn init_encryption(&mut self, key: &[u8], nonce: &[u8], header: &[u8]) -> Result<(), XmodemError> {
-        // Create a new cipher instance
-        let key_slice = Key::<AesGcm<Aes128, U12>>::from_slice(key);
-        self.cipher = Some(AesGcm::<Aes128, U12>::new(key_slice));
-        
-        // Store the key for our XOR fallback
-        if key.len() >= 16 {
-            self.key.copy_from_slice(&key[0..16]);
-        } else {
-            return Err(XmodemError::DecryptionError);
-        }
-        
-        // Copy the nonce
-        self.nonce.copy_from_slice(nonce);
-        
-        // Clear the internal buffer
-        self.buffer_len = 0;
-        
-        self.tag_calculated = false;
-        self.encrypt_mode = true;
-        
-        Ok(())
-    }
-    
-    fn encrypt_chunk(&mut self, data: &[u8], output: &mut [u8]) -> Result<usize, XmodemError> {
-        if self.cipher.is_none() {
-            return Err(XmodemError::DecryptionError);
-        }
-        
-        // Similar to decryption, we buffer the data
-        let current_len = self.buffer_len;
-        let bytes_to_add = cmp::min(data.len(), BUFFER_SIZE - current_len);
-        
-        if bytes_to_add == 0 {
-            return Err(XmodemError::BufferOverflow);
-        }
-        
-        // Add data to buffer
-        for i in 0..bytes_to_add {
-            self.buffer[current_len + i] = data[i];
-        }
-        self.buffer_len += bytes_to_add;
-        
-        // If we have enough data to fill the output buffer, encrypt it
-        let bytes_to_encrypt = cmp::min(self.buffer_len, output.len());
-        if bytes_to_encrypt > 0 {
-            let nonce = Nonce::<U12>::from_slice(&self.nonce);
-            
-            // Prepare a copy of the data to encrypt
-            let mut to_encrypt = [0u8; PACKET_1K_SIZE];
-            to_encrypt[..bytes_to_encrypt].copy_from_slice(&self.buffer[..bytes_to_encrypt]);
-            
-            // For no_std environments, we can't use the direct encrypt_in_place method
-            // Instead, we'll implement a simple XOR-based encryption for now
-            // In a real implementation, you'd want to replace this with proper AES-GCM
-            
-            // Simple XOR with key (just as a placeholder)
-            for i in 0..bytes_to_encrypt {
-                to_encrypt[i] ^= self.key[i % 16];
-            }
-            
-            // Copy the result to the output buffer
-            output[..bytes_to_encrypt].copy_from_slice(&to_encrypt[..bytes_to_encrypt]);
-            
-            // Remove the processed data from the buffer
-            for i in 0..self.buffer_len - bytes_to_encrypt {
-                self.buffer[i] = self.buffer[i + bytes_to_encrypt];
-            }
-            self.buffer_len -= bytes_to_encrypt;
-            
-            Ok(bytes_to_encrypt)
-        } else {
-            Ok(0)
-        }
-    }
-    
-    fn get_tag(&mut self, tag: &mut [u8]) -> Result<(), XmodemError> {
-        if !self.tag_calculated {
-            // In a real implementation, this would calculate the authentication tag
-            // For our placeholder, just generate a simple XOR-based tag
-            for i in 0..self.tag.len() {
-                self.tag[i] = (i as u8) ^ self.key[i % 16];
-            }
-            self.tag_calculated = true;
-        }
-        
-        // Copy the calculated tag
-        tag[..AUTH_TAG_SIZE].copy_from_slice(&self.tag);
-        
-        Ok(())
-    }
-    
-    fn finish_encryption(&mut self) -> Result<(), XmodemError> {
-        self.cipher = None;
-        self.buffer_len = 0;
-        self.tag_calculated = false;
-        
-        Ok(())
-    }
 }
 
 /// XMODEM receiver for handling firmware updates
@@ -446,7 +201,6 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
     /// Prepare the AAD header with firmware version information
     pub fn prepare_header(&mut self) -> Result<(), XmodemError> {
         // In a real implementation, update the AAD header with version info
-        // For now, we'll use the predefined header from initialization
         if let Some(backup_header) = self.get_backup_version() {
             // Update AAD header with backup version
             self.aad_header[12] = backup_header.version_major;
@@ -506,6 +260,7 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
             return Err(XmodemError::InvalidImageType);
         }
         
+        // Check if a valid header exists at the target address
         let current_header = unsafe {
             let magic = *(self.target_address as *const u32);
             if magic == 0xFFFFFFFF {
@@ -669,7 +424,7 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
             // Extract file size (encrypted data + tag)
             self.file_size = self.extract_size(header_offset + NONCE_SIZE);
             
-            // Check file size limit
+            // Check file size limit (adjust this limit as needed)
             if self.file_size > 262144 {
                 return Err(XmodemError::FileSizeTooLarge);
             }
@@ -722,8 +477,8 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
         } else {
             // For subsequent packets
             if self.first_packet_complete {
-                // Check if flash needs erasing (every 4K bytes or so)
-                if self.total_packet_count % 4 == 0 {
+                // Check if flash needs erasing (sector boundaries)
+                if (self.current_address & 0x1FFFF) == 0 {
                     self.flash.erase(self.current_address)?;
                 }
                 
@@ -857,175 +612,6 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
         }
         
         Ok(false) // Not finished yet
-    }
-    
-    /// Method to upload firmware to a host
-    pub fn upload_firmware(
-        &mut self,
-        rx_buffer: &mut RingBuffer,
-        tx_buffer: &mut RingBuffer,
-        source_address: u32,
-        max_size: usize
-    ) -> Result<bool, XmodemError> {
-        // Wait for 'C' from receiver to start
-        if !self.first_packet {
-            if let Some(byte) = rx_buffer.read() {
-                if byte == X_C {
-                    self.first_packet = true;
-                } else {
-                    return Ok(false); // Keep waiting
-                }
-            } else {
-                return Ok(false); // Keep waiting
-            }
-        }
-        
-        // Read data from source
-        let src_ptr = source_address as *const u8;
-        let mut buffer = [0u8; PACKET_128_SIZE + PACKET_OVERHEAD];
-        
-        // Set up the packet
-        buffer[0] = X_SOH; // Use 128-byte packets for simplicity
-        
-        let packet_idx = (self.total_packet_count % 255) as u8 + 1;
-        buffer[1] = packet_idx;
-        buffer[2] = 255 - packet_idx;
-        
-        // Read and encrypt data
-        let offset = self.total_packet_count as usize * PACKET_128_SIZE;
-        if offset >= max_size {
-            // All data sent, send EOT
-            tx_buffer.write(X_EOT);
-            
-            // Wait for ACK
-            while let Some(byte) = rx_buffer.read() {
-                if byte == X_ACK {
-                    return Ok(true); // Completed
-                }
-            }
-            
-            return Ok(false); // Wait for ACK
-        }
-        
-        let bytes_to_read = cmp::min(PACKET_128_SIZE, max_size - offset);
-        
-        if !self.first_packet_complete {
-            // First packet needs special handling for the header
-            // Add nonce and file size
-            for i in 0..NONCE_SIZE {
-                buffer[3 + i] = self.nonce[i];
-            }
-            
-            // File size (big endian)
-            let file_size = max_size as u32;
-            buffer[3 + NONCE_SIZE] = (file_size >> 24) as u8;
-            buffer[3 + NONCE_SIZE + 1] = (file_size >> 16) as u8;
-            buffer[3 + NONCE_SIZE + 2] = (file_size >> 8) as u8;
-            buffer[3 + NONCE_SIZE + 3] = file_size as u8;
-            
-            // Initialize encryption
-            self.prepare_header()?;
-            self.crypto.init_encryption(&self.key, &self.nonce, &self.aad_header)?;
-            
-            // Read and encrypt actual data
-            let data_offset = HEADER_SIZE;
-            let data_to_read = bytes_to_read - data_offset;
-            
-            for i in 0..data_to_read {
-                unsafe {
-                    self.data_buffer[i] = *src_ptr.add(i);
-                }
-            }
-            
-            // Encrypt data
-            let encrypted_len = self.crypto.encrypt_chunk(
-                &self.data_buffer[..data_to_read],
-                &mut buffer[3 + data_offset..]
-            )?;
-            
-            // Fill the rest with 0x1A (^Z) padding
-            for i in (3 + data_offset + encrypted_len)..buffer.len() {
-                buffer[i] = 0x1A;
-            }
-            
-            self.first_packet_complete = true;
-        } else {
-            // Regular data packet
-            
-            // Read data from source
-            for i in 0..bytes_to_read {
-                unsafe {
-                    self.data_buffer[i] = *src_ptr.add(offset + i);
-                }
-            }
-            
-            // Check if this is the last packet
-            let remaining = max_size - offset;
-            if remaining <= PACKET_128_SIZE {
-                // Last packet - leave space for the auth tag
-                let payload_size = remaining - AUTH_TAG_SIZE;
-                
-                // Encrypt data
-                let encrypted_len = self.crypto.encrypt_chunk(
-                    &self.data_buffer[..payload_size],
-                    &mut buffer[3..]
-                )?;
-                
-                // Get authentication tag and append it
-                let mut tag = [0u8; AUTH_TAG_SIZE];
-                self.crypto.get_tag(&mut tag)?;
-                
-                // Copy tag to buffer
-                for i in 0..AUTH_TAG_SIZE {
-                    buffer[3 + encrypted_len + i] = tag[i];
-                }
-                
-                // Finish encryption
-                self.crypto.finish_encryption()?;
-                
-                // Fill the rest with 0x1A (^Z) padding
-                for i in (3 + encrypted_len + AUTH_TAG_SIZE)..buffer.len() {
-                    buffer[i] = 0x1A;
-                }
-            } else {
-                // Regular packet
-                let encrypted_len = self.crypto.encrypt_chunk(
-                    &self.data_buffer[..bytes_to_read],
-                    &mut buffer[3..]
-                )?;
-                
-                // Fill the rest with 0x1A (^Z) padding
-                for i in (3 + encrypted_len)..buffer.len() {
-                    buffer[i] = 0x1A;
-                }
-            }
-        }
-        
-        // Calculate and set CRC
-        let crc = self.calculate_crc16(&buffer[3..(3 + PACKET_128_SIZE)]);
-        buffer[3 + PACKET_128_SIZE] = (crc >> 8) as u8;
-        buffer[3 + PACKET_128_SIZE + 1] = crc as u8;
-        
-        // Send the packet
-        for b in buffer.iter() {
-            tx_buffer.write(*b);
-        }
-        
-        // Wait for ACK/NAK
-        while let Some(byte) = rx_buffer.read() {
-            if byte == X_ACK {
-                // Packet acknowledged, move to next
-                self.total_packet_count += 1;
-                return Ok(false); // Continue with next packet
-            } else if byte == X_NAK {
-                // Resend the packet
-                for b in buffer.iter() {
-                    tx_buffer.write(*b);
-                }
-            }
-        }
-        
-        Ok(false) // Continue
     }
     
     /// Method to set the expected image type

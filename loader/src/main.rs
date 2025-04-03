@@ -11,7 +11,7 @@ use cortex_m::{
 };
 
 use cortex_m_rt::{entry, exception};
-use stm32f4::{self as pac, ethernet_ptp::ptpppscr, Peripherals, Usart2};
+use stm32f4::{self as pac, Peripherals, Usart2};
 use misc::{
     ring_buffer::RingBuffer,
     image::{ImageHeader, SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER}
