@@ -1,10 +1,15 @@
 #![no_std]
 #![no_main]
 
-use core::panic::PanicInfo;
-use cortex_m::asm;
+use core::{
+    cell::UnsafeCell, panic::PanicInfo, sync::atomic::{AtomicBool, Ordering}
+};
+use cortex_m::{
+    asm,
+    peripheral::{self, SYST}
+};
 use cortex_m_rt::entry;
-use stm32f4 as pac;
+use stm32f4::{self as pac, Peripherals};
 use misc::{
     flash,
     image::{ImageHeader, SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER}
@@ -28,22 +33,64 @@ const TEST_PATTERN1: u32 = 0xABCDABCD;
 const TEST_PATTERN2: u32 = 0x12341234;
 const TEST_SIZE: usize = 1024; // 1KB of test data
 
+// Для хранения глобальных указателей
+pub struct Mutex<T> {
+    inner: UnsafeCell<T>
+}
+
+unsafe impl<T> Sync for Mutex<T> {}
+
+impl<T> Mutex<T> {
+    pub const fn new(value: T) -> Self {
+        Self { inner: UnsafeCell::new(value) }
+    }
+
+    pub fn get<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        cortex_m::interrupt::free(|_| {
+            let ptr = self.inner.get();
+            f(unsafe { &mut *ptr })
+        })
+    }
+}
+
+// Обертка для указателей на периферию
+struct PeripheralPtr<T>(*const T);
+unsafe impl<T> Send for PeripheralPtr<T> {}
+unsafe impl<T> Sync for PeripheralPtr<T> {}
+
+// Глобальные указатели на GPIOD для работы со светодиодами
+static GPIOD_PTR: Mutex<Option<PeripheralPtr<pac::gpiod::RegisterBlock>>> = Mutex::new(None);
+static TEST_FAILED: AtomicBool = AtomicBool::new(false);
+
 #[entry]
 fn main() -> ! {
-    // Initialize peripherals
-    let p = pac::Peripherals::take();
+    // Инициализация периферии в стиле вашего основного файла
+    let p: Peripherals = match pac::Peripherals::take() {
+        Some(p) => p,
+        None => {
+            loop {
+                asm::nop();
+            }
+        }
+    };
     
-    // Setup system clock
+    // Сохраняем указатель на GPIOD для использования в других функциях
+    let gpiod_ptr: &pac::gpiod::RegisterBlock = unsafe {
+        &*(p.gpiod.moder().as_ptr() as *const _ as *const pac::gpiod::RegisterBlock)
+    };
+    GPIOD_PTR.get(|ptr| *ptr = Some(PeripheralPtr(gpiod_ptr)));
+    
+    // Настраиваем системные часы
     setup_system_clock(&p);
     
-    // Configure LEDs for status indication
+    // Настраиваем светодиоды
     setup_leds(&p);
     
-    // Prepare test patterns
+    // Подготавливаем тестовые данные
     let mut test_pattern1 = [0u8; TEST_SIZE];
     let mut test_pattern2 = [0u8; TEST_SIZE];
     
-    // Fill test patterns with repeating values
+    // Заполняем тестовые данные повторяющимися значениями
     for i in (0..TEST_SIZE).step_by(4) {
         // Pattern 1: 0xABCDABCD
         test_pattern1[i] = (TEST_PATTERN1 & 0xFF) as u8;
@@ -58,83 +105,106 @@ fn main() -> ! {
         test_pattern2[i+3] = ((TEST_PATTERN2 >> 24) & 0xFF) as u8;
     }
     
-    // Buffer for reading back data
+    // Буфер для чтения данных
     let mut read_buffer = [0u8; TEST_SIZE];
     
-    // STEP 1: Erase the target sector
-    blink_led(&p, 12); // Green LED
+    // ШАГ 1: Стираем целевой сектор
+    blink_led(12); // Зеленый светодиод
     
     let erase_result = flash::erase_sector(&p, TEST_ADDR);
     if erase_result == 0 {
-        error_blink(&p, 14); // Red LED
-        loop {}
+        error_blink(14); // Красный светодиод
+        TEST_FAILED.store(true, Ordering::SeqCst);
+        loop {
+            asm::nop();
+        }
     }
     
-    // STEP 2: Write first test pattern
-    blink_led(&p, 13); // Orange LED
+    // ШАГ 2: Записываем первый тестовый шаблон
+    blink_led(13); // Оранжевый светодиод
     
     let write_result = flash::write(&p, &test_pattern1, TEST_ADDR);
     if write_result != 0 {
-        error_blink(&p, 14); // Red LED
-        loop {}
+        error_blink(14); // Красный светодиод
+        TEST_FAILED.store(true, Ordering::SeqCst);
+        loop {
+            asm::nop();
+        }
     }
     
-    // STEP 3: Read back and verify first pattern
-    blink_led(&p, 12); // Green LED
+    // ШАГ 3: Читаем и проверяем первый шаблон
+    blink_led(12); // Зеленый светодиод
     
     flash::read(TEST_ADDR, &mut read_buffer);
     
     for i in 0..TEST_SIZE {
         if read_buffer[i] != test_pattern1[i] {
-            error_blink(&p, 14); // Red LED
-            loop {}
+            error_blink(14); // Красный светодиод
+            TEST_FAILED.store(true, Ordering::SeqCst);
+            loop {
+                asm::nop();
+            }
         }
     }
     
-    // STEP 4: Erase the sector again
-    blink_led(&p, 13); // Orange LED
+    // ШАГ 4: Снова стираем сектор
+    blink_led(13); // Оранжевый светодиод
     
     let erase_result = flash::erase_sector(&p, TEST_ADDR);
     if erase_result == 0 {
-        error_blink(&p, 14); // Red LED
-        loop {}
+        error_blink(14); // Красный светодиод
+        TEST_FAILED.store(true, Ordering::SeqCst);
+        loop {
+            asm::nop();
+        }
     }
     
-    // STEP 5: Verify the sector is erased (all 0xFF)
-    blink_led(&p, 12); // Green LED
+    // ШАГ 5: Проверяем, что сектор стерт (все 0xFF)
+    blink_led(12); // Зеленый светодиод
     
     flash::read(TEST_ADDR, &mut read_buffer);
     
     for i in 0..TEST_SIZE {
         if read_buffer[i] != 0xFF {
-            error_blink(&p, 14); // Red LED
-            loop {}
+            error_blink(14); // Красный светодиод
+            TEST_FAILED.store(true, Ordering::SeqCst);
+            loop {
+                asm::nop();
+            }
         }
     }
     
-    // STEP 6: Write second test pattern
-    blink_led(&p, 13); // Orange LED
+    // ШАГ 6: Записываем второй тестовый шаблон
+    blink_led(13); // Оранжевый светодиод
     
     let write_result = flash::write(&p, &test_pattern2, TEST_ADDR);
     if write_result != 0 {
-        error_blink(&p, 14); // Red LED
-        loop {}
+        error_blink(14); // Красный светодиод
+        TEST_FAILED.store(true, Ordering::SeqCst);
+        loop {
+            asm::nop();
+        }
     }
     
-    // STEP 7: Read back and verify second pattern
-    blink_led(&p, 12); // Green LED
+    // ШАГ 7: Читаем и проверяем второй шаблон
+    blink_led(12); // Зеленый светодиод
     
     flash::read(TEST_ADDR, &mut read_buffer);
     
     for i in 0..TEST_SIZE {
         if read_buffer[i] != test_pattern2[i] {
-            error_blink(&p, 14); // Red LED
-            loop {}
+            error_blink(14); // Красный светодиод
+            TEST_FAILED.store(true, Ordering::SeqCst);
+            loop {
+                asm::nop();
+            }
         }
     }
     
-    // All tests passed! Celebrate with LED pattern
-    success_pattern(&p);
+    // Все тесты пройдены! Отмечаем успех
+    if !TEST_FAILED.load(Ordering::SeqCst) {
+        success_pattern();
+    }
     
     loop {
         asm::nop();
@@ -142,27 +212,27 @@ fn main() -> ! {
 }
 
 fn setup_system_clock(p: &pac::Peripherals) {
-    // Enable PWR clock
+    // Включаем PWR
     p.rcc.apb1enr().modify(|_, w| w.pwren().set_bit());
 
-    // Set voltage scaling to Scale 1
+    // Устанавливаем Scale 1
     p.pwr.cr().modify(|_, w| w.vos().scale1());
 
-    // Configure flash access control
+    // Настраиваем доступ к флэш-памяти
     p.flash.acr().modify(|_, w| w
         .latency().ws5()
-        .prften().enabled()
-        .icen().enabled()
-        .dcen().enabled()
+        .prften().set_bit()
+        .icen().set_bit()
+        .dcen().set_bit()
     );
 
-    // Enable HSE
+    // Включаем HSE
     p.rcc.cr().modify(|_, w| w.hseon().set_bit());
     while p.rcc.cr().read().hserdy().bit_is_clear() {
-        // Wait for HSE ready
+        // Ждем готовности HSE
     }
 
-    // Configure PLL
+    // Настраиваем PLL
     p.rcc.pllcfgr().modify(|_, w| unsafe {
         w.pllsrc().hse()
          .pllm().bits(4)
@@ -171,87 +241,106 @@ fn setup_system_clock(p: &pac::Peripherals) {
          .pllq().bits(4)
     });
 
-    // Enable PLL
+    // Включаем PLL
     p.rcc.cr().modify(|_, w| w.pllon().set_bit());
     while p.rcc.cr().read().pllrdy().bit_is_clear() {
-        // Wait for PLL ready
+        // Ждем готовности PLL
     }
 
-    // Set bus dividers
-    p.rcc.cfgr().modify(|_, w| w
-        .hpre().div1()
+    // Настраиваем делители шин
+    p.rcc.cfgr().modify(|_, w| {
+        w.hpre().div1()
         .ppre1().div4()
         .ppre2().div2()
-    );
+    });
 
-    // Select PLL as system clock
+    // Устанавливаем PLL как источник системных часов
     p.rcc.cfgr().modify(|_, w| w.sw().pll());
     while !p.rcc.cfgr().read().sws().is_pll() {
-        // Wait for system clock switch
+        // Ждем переключения
     }
 }
 
 fn setup_leds(p: &pac::Peripherals) {
-    // Enable GPIOD clock
+    // Включаем тактирование GPIOD
     p.rcc.ahb1enr().modify(|_, w| w.gpioden().set_bit());
 
-    // Configure LEDs (PD12-Green, PD13-Orange, PD14-Red, PD15-Blue)
-    p.gpiod.moder().modify(|_, w| w
-        .moder12().output()
-        .moder13().output()
-        .moder14().output()
-        .moder15().output()
-    );
+    // Настраиваем LED (PD12-Green, PD13-Orange, PD14-Red, PD15-Blue)
+    p.gpiod.moder().modify(|_, w| {
+        w.moder12().output()
+         .moder13().output()
+         .moder14().output()
+         .moder15().output()
+    });
     
-    p.gpiod.otyper().modify(|_, w| w
-        .ot12().push_pull()
-        .ot13().push_pull()
-        .ot14().push_pull()
-        .ot15().push_pull()
-    );
+    p.gpiod.otyper().modify(|_, w| {
+        w.ot12().push_pull()
+         .ot13().push_pull()
+         .ot14().push_pull()
+         .ot15().push_pull()
+    });
     
-    p.gpiod.ospeedr().modify(|_, w| w
-        .ospeedr12().low_speed()
-        .ospeedr13().low_speed()
-        .ospeedr14().low_speed()
-        .ospeedr15().low_speed()
-    );
+    p.gpiod.ospeedr().modify(|_, w| {
+        w.ospeedr12().low_speed()
+         .ospeedr13().low_speed()
+         .ospeedr14().low_speed()
+         .ospeedr15().low_speed()
+    });
 }
 
-fn blink_led(p: &pac::Peripherals, pin: u8) {
-    // Turn on specified LED
-    p.gpiod.bsrr().write(|w| unsafe { w.bits(1 << pin) });
-    delay(200000);
-    
-    // Turn off specified LED
-    p.gpiod.bsrr().write(|w| unsafe { w.bits(1 << (pin + 16)) });
-    delay(200000);
-}
-
-fn error_blink(p: &pac::Peripherals, pin: u8) {
-    // Rapidly blink error LED 10 times
-    for _ in 0..10 {
-        p.gpiod.bsrr().write(|w| unsafe { w.bits(1 << pin) });
-        delay(50000);
-        p.gpiod.bsrr().write(|w| unsafe { w.bits(1 << (pin + 16)) });
-        delay(50000);
-    }
-}
-
-fn success_pattern(p: &pac::Peripherals) {
-    // Cycle through all LEDs in sequence
-    for _ in 0..3 {
-        for pin in 12..=15 {
-            p.gpiod.bsrr().write(|w| unsafe { w.bits(1 << pin) });
-            delay(100000);
-            p.gpiod.bsrr().write(|w| unsafe { w.bits(1 << (pin + 16)) });
+// Функции работы со светодиодами через глобальные указатели
+fn blink_led(pin: u8) {
+    GPIOD_PTR.get(|gpiod_opt| {
+        if let Some(ref gpiod_ptr) = *gpiod_opt {
+            let gpiod = unsafe { &*gpiod_ptr.0 };
+            
+            // Включаем светодиод
+            gpiod.bsrr().write(|w| unsafe { w.bits(1 << pin) });
+            delay(200000);
+            
+            // Выключаем светодиод
+            gpiod.bsrr().write(|w| unsafe { w.bits(1 << (pin + 16)) });
+            delay(200000);
         }
-    }
-    
-    // Then turn all on simultaneously
-    p.gpiod.bsrr().write(|w| unsafe { w.bits(0xF000) });
-    delay(500000);
-    p.gpiod.bsrr().write(|w| unsafe { w.bits(0xF0000) });
+    });
+}
+
+fn error_blink(pin: u8) {
+    GPIOD_PTR.get(|gpiod_opt| {
+        if let Some(ref gpiod_ptr) = *gpiod_opt {
+            let gpiod = unsafe { &*gpiod_ptr.0 };
+            
+            // Быстро мигаем красным светодиодом 10 раз
+            for _ in 0..10 {
+                gpiod.bsrr().write(|w| unsafe { w.bits(1 << pin) });
+                delay(50000);
+                gpiod.bsrr().write(|w| unsafe { w.bits(1 << (pin + 16)) });
+                delay(50000);
+            }
+        }
+    });
+}
+
+fn success_pattern() {
+    GPIOD_PTR.get(|gpiod_opt| {
+        if let Some(ref gpiod_ptr) = *gpiod_opt {
+            let gpiod = unsafe { &*gpiod_ptr.0 };
+            
+            // Последовательно проходим по всем светодиодам
+            for _ in 0..3 {
+                for pin in 12..=15 {
+                    gpiod.bsrr().write(|w| unsafe { w.bits(1 << pin) });
+                    delay(100000);
+                    gpiod.bsrr().write(|w| unsafe { w.bits(1 << (pin + 16)) });
+                }
+            }
+            
+            // Затем включаем все одновременно
+            gpiod.bsrr().write(|w| unsafe { w.bits(0xF000) });
+            delay(500000);
+            gpiod.bsrr().write(|w| unsafe { w.bits(0xF0000) });
+        }
+    });
 }
 
 fn delay(count: u32) {
