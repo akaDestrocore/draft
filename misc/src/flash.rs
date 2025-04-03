@@ -103,8 +103,6 @@ pub fn get_sector_number(address: u32) -> Option<u8> {
     None
 }
 
-/// Erases a single flash sector at the given address
-/// Returns the size of the erased sector in bytes (or 0 on error)
 pub fn erase_sector(p: &pac::Peripherals, destination: u32) -> u32 {
     // Check for existing flash errors
     if p.flash.sr().read().bsy().is_busy() || !wait_for_last_operation(p) {
@@ -122,9 +120,10 @@ pub fn erase_sector(p: &pac::Peripherals, destination: u32) -> u32 {
         return 0;
     }
 
-    // Configure sector erase
+    // Configure sector erase - ADD PSIZE HERE
     unsafe {
         p.flash.cr().modify(|_, w| w
+            .psize().psize32()  // Set 32-bit PSIZE for 2.7V-3.6V
             .ser().sector_erase()
             .snb().bits(sector)
         );
