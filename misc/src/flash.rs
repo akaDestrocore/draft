@@ -1,205 +1,181 @@
 #![no_std]
 
 use crate::xmodem::XmodemError;
-use core::ptr::{read_volatile, write_volatile};
-use stm32f4::{self as pac, Peripherals};
+use stm32f4::{self as pac, Flash};
 
-pub const FLASH_KEY1: u32 = 0x45670123;
-pub const FLASH_KEY2: u32 = 0xCDEF89AB;
-
-// STM32F4 flash sector layout
-pub struct FlashSector {
-    pub address: u32,
-    pub size: u32,
+pub struct Stm32f4Flash {
+    flash: Flash,
 }
 
-const FLASH_SECTORS: [FlashSector; 12] = [
-    FlashSector { address: 0x08000000, size: 16 * 1024 },    // Sector 0
-    FlashSector { address: 0x08004000, size: 16 * 1024 },    // Sector 1
-    FlashSector { address: 0x08008000, size: 16 * 1024 },    // Sector 2
-    FlashSector { address: 0x0800C000, size: 16 * 1024 },    // Sector 3
-    FlashSector { address: 0x08010000, size: 64 * 1024 },    // Sector 4
-    FlashSector { address: 0x08020000, size: 128 * 1024 },   // Sector 5
-    FlashSector { address: 0x08040000, size: 128 * 1024 },   // Sector 6
-    FlashSector { address: 0x08060000, size: 128 * 1024 },   // Sector 7
-    FlashSector { address: 0x08080000, size: 128 * 1024 },   // Sector 8
-    FlashSector { address: 0x080A0000, size: 128 * 1024 },   // Sector 9
-    FlashSector { address: 0x080C0000, size: 128 * 1024 },   // Sector 10
-    FlashSector { address: 0x080E0000, size: 128 * 1024 },   // Sector 11
-];
-
-fn wait_for_last_operation(&self) -> Result<(), XmodemError> {
-    let max_retries: i32 = 50000;
-    let mut retries: i32 = 0;
-    
-    while 
-
-    while self.is_busy() && retries < max_retries {
-        retries += 1;
+impl Stm32f4Flash {
+    pub fn new(flash: Flash) -> Self {
+        Self { flash }
     }
-    
-    if retries >= max_retries {
-        return Err(XmodemError::FlashError);
-    }
-    
-    // Check for errors
-    let sr = unsafe { read_volatile(&self.get_registers().sr) };
-    if sr & (FLASH_SR_PGSERR | FLASH_SR_PGPERR | FLASH_SR_PGAERR | FLASH_SR_WRPERR | FLASH_SR_OPERR) != 0 {
-        return Err(XmodemError::FlashError);
-    }
-    
-    Ok(())
-}
 
-fn is_busy(&self) -> bool {
-    let sr = unsafe { read_volatile(&self.get_registers().sr) };
-    (sr & FLASH_SR_BSY) != 0
-}
+    fn unlock(&self) -> Result<(), XmodemError> {
+        // Check if already unlocked
+        if self.flash.cr().read().lock().is_unlocked() {
+            return Ok(());
+        }
 
-fn unlock(&self) -> Result<(), XmodemError> {
-    // Check if already unlocked
-    let cr = unsafe { read_volatile(&self.get_registers().cr) };
-    if (cr & FLASH_CR_LOCK) == 0 {
-        return Ok(());
-    }
-    
-    // Write unlock keys
-    unsafe {
-        write_volatile(&mut self.get_registers().keyr, FLASH_KEY1);
-        write_volatile(&mut self.get_registers().keyr, FLASH_KEY2);
-    }
-    
-    // Verify unlock
-    let cr = unsafe { read_volatile(&self.get_registers().cr) };
-    if (cr & FLASH_CR_LOCK) != 0 {
-        return Err(XmodemError::FlashError);
-    }
-    
-    Ok(())
-}
+        // Write unlock keys
+        unsafe {
+            self.flash.keyr().write(|w| w.key().set(0x45670123));
+            self.flash.keyr().write(|w| w.key().set(0xCDEF89AB));
+        }
 
-fn lock(&self) {
-    unsafe {
-        let mut cr = read_volatile(&self.get_registers().cr);
-        cr |= FLASH_CR_LOCK;
-        write_volatile(&mut self.get_registers().cr, cr);
+        // Verify unlock
+        if self.flash.cr().read().lock().is_locked() {
+            return Err(XmodemError::FlashError);
+        }
+
+        Ok(())
     }
-}
 
-fn find_sector(&self, address: u32) -> Option<usize> {
-    FLASH_SECTORS.iter().position(|sector| 
-        address >= sector.address && 
-        address < (sector.address + sector.size)
-    )
-}
+    fn lock(&self) {
+        self.flash.cr().modify(|_, w| w.lock().locked());
+    }
 
-fn erase_sector(&self, sector_number: usize) -> Result<(), XmodemError> {
-    self.wait_for_last_operation()?;
-    
-    unsafe {
-        // Set sector erase mode
-        let mut cr = read_volatile(&self.get_registers().cr);
-        cr &= !(FLASH_CR_SNB_MASK << FLASH_CR_SNB_SHIFT);
-        cr |= (sector_number as u32 & 0xF) << FLASH_CR_SNB_SHIFT;
-        cr |= FLASH_CR_SER;
-        write_volatile(&mut self.get_registers().cr, cr);
+    fn wait_for_last_operation(&self) -> Result<(), XmodemError> {
+        // Wait for operation to complete
+        let mut retries = 50000;
+        while self.flash.sr().read().bsy().is_busy() && retries > 0 {
+            retries -= 1;
+        }
+
+        if retries == 0 {
+            return Err(XmodemError::FlashError);
+        }
+
+        // Check for errors
+        let sr = self.flash.sr().read();
         
-        // Start the erase operation
-        cr |= FLASH_CR_STRT;
-        write_volatile(&mut self.get_registers().cr, cr);
-    }
-    
-    self.wait_for_last_operation()?;
-    
-    // Clear sector erase bit
-    unsafe {
-        let mut cr = read_volatile(&self.get_registers().cr);
-        cr &= !FLASH_CR_SER;
-        write_volatile(&mut self.get_registers().cr, cr);
-    }
-    
-    Ok(())
-}
+        // Check each error flag
+        if sr.pgserr().is_active() || sr.pgperr().is_active() || 
+           sr.pgaerr().is_active() || sr.wrperr().is_active() || 
+           sr.operr().is_active() {
+            
+            // Clear error flags
+            self.flash.sr().write(|w| {
+                w.pgserr().clear()
+                 .pgperr().clear()
+                 .pgaerr().clear()
+                 .wrperr().clear()
+                 .operr().clear()
+            });
+            
+            return Err(XmodemError::FlashError);
+        }
 
-fn program_word(&self, address: u32, data: u32) -> Result<(), XmodemError> {
-    self.wait_for_last_operation()?;
-    
-    unsafe {
-        // Set programming mode
-        let mut cr = read_volatile(&self.get_registers().cr);
-        cr &= !(FLASH_CR_PSIZE_64); // Clear PSIZE bits
-        cr |= FLASH_CR_PSIZE_32;    // Set 32-bit programming
-        cr |= FLASH_CR_PG;          // Set programming bit
-        write_volatile(&mut self.get_registers().cr, cr);
-        
-        // Write data
-        write_volatile(address as *mut u32, data);
+        Ok(())
     }
-    
-    self.wait_for_last_operation()?;
-    
-    // Verify written data
-    let read_data = unsafe { read_volatile(address as *const u32) };
-    if read_data != data {
-        return Err(XmodemError::FlashError);
+
+    fn get_sector_number(&self, address: u32) -> Option<u8> {
+        match address {
+            addr if addr >= 0x08000000 && addr < 0x08004000 => Some(0),  // 16 KB
+            addr if addr >= 0x08004000 && addr < 0x08008000 => Some(1),  // 16 KB
+            addr if addr >= 0x08008000 && addr < 0x0800C000 => Some(2),  // 16 KB
+            addr if addr >= 0x0800C000 && addr < 0x08010000 => Some(3),  // 16 KB
+            addr if addr >= 0x08010000 && addr < 0x08020000 => Some(4),  // 64 KB
+            addr if addr >= 0x08020000 && addr < 0x08040000 => Some(5),  // 128 KB
+            addr if addr >= 0x08040000 && addr < 0x08060000 => Some(6),  // 128 KB
+            addr if addr >= 0x08060000 && addr < 0x08080000 => Some(7),  // 128 KB
+            addr if addr >= 0x08080000 && addr < 0x080A0000 => Some(8),  // 128 KB
+            addr if addr >= 0x080A0000 && addr < 0x080C0000 => Some(9),  // 128 KB
+            addr if addr >= 0x080C0000 && addr < 0x080E0000 => Some(10), // 128 KB
+            addr if addr >= 0x080E0000 && addr < 0x08100000 => Some(11), // 128 KB
+            _ => None,
+        }
     }
-    
-    // Clear programming bit
-    unsafe {
-        let mut cr = read_volatile(&self.get_registers().cr);
-        cr &= !FLASH_CR_PG;
-        write_volatile(&mut self.get_registers().cr, cr);
-    }
-    
-    Ok(())
 }
 
 impl crate::xmodem::FlashOperations for Stm32f4Flash {
     fn erase(&self, address: u32) -> Result<(), XmodemError> {
-        // Find sector to erase
-        let sector_number = match self.find_sector(address) {
-            Some(sector) => sector,
+        // Get the sector number from the address
+        let sector = match self.get_sector_number(address) {
+            Some(s) => s,
             None => return Err(XmodemError::FlashError),
         };
-        
+
+        // Unlock flash
         self.unlock()?;
-        let result = self.erase_sector(sector_number);
+        
+        // Wait for any previous operations to complete
+        self.wait_for_last_operation()?;
+
+        // Set up sector erase
+        self.flash.cr().modify(|_, w| unsafe {
+            w.ser().sector_erase()
+             .snb().bits(sector)
+        });
+
+        // Start erase
+        self.flash.cr().modify(|_, w| w.strt().start());
+
+        // Wait for the erase to complete
+        self.wait_for_last_operation()?;
+
+        // Clear SER bit
+        self.flash.cr().modify(|_, w| w.ser().clear_bit());
+
+        // Lock flash
         self.lock();
         
-        result
+        Ok(())
     }
-    
+
     fn write(&self, address: u32, data: &[u8]) -> Result<(), XmodemError> {
         if data.is_empty() {
             return Ok(());
         }
-        
-        // Ensure alignment
+
+        // Ensure address is aligned to 4 bytes (32-bit)
         if address % 4 != 0 {
             return Err(XmodemError::FlashError);
         }
-        
+
+        // Unlock flash
         self.unlock()?;
         
+        // Wait for any previous operations to complete
+        self.wait_for_last_operation()?;
+
+        // Set programming mode (32-bit)
+        self.flash.cr().modify(|_, w| {
+            w.pg().program()
+             .psize().psize32()
+        });
+
         // Write data in 32-bit chunks
         for (i, chunk) in data.chunks(4).enumerate() {
-            let mut word: u32 = 0;
+            let mut word = 0u32;
             
             // Convert chunk to u32
-            for j in 0..chunk.len() {
-                word |= (chunk[j] as u32) << (8 * j);
+            for (j, &byte) in chunk.iter().enumerate() {
+                word |= (byte as u32) << (j * 8);
             }
-            
-            // If chunk is less than 4 bytes, fill remaining with 0xFF
+
+            // Fill remaining bytes with 0xFF if chunk is smaller than 4 bytes
             for j in chunk.len()..4 {
-                word |= 0xFF_u32 << (8 * j);
+                word |= 0xFF_u32 << (j * 8);
             }
-            
-            let offset = i * 4;
-            self.program_word(address + (offset as u32), word)?;
+
+            // Write word to flash
+            let addr = address + (i * 4) as u32;
+            unsafe {
+                core::ptr::write_volatile(addr as *mut u32, word);
+            }
+
+            // Wait for the write to complete
+            self.wait_for_last_operation()?;
         }
-        
+
+        // Clear PG bit
+        self.flash.cr().modify(|_, w| w.pg().clear_bit());
+
+        // Lock flash
         self.lock();
+        
         Ok(())
     }
 }

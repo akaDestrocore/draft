@@ -2,8 +2,6 @@
 
 use crate::xmodem::XmodemError;
 
-/// Simple XOR-based crypto for demonstration
-/// In a real system, you would use a proper AES-GCM implementation
 pub struct SimpleCrypto {
     key: [u8; 16],
     nonce: [u8; 12],

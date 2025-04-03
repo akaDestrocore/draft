@@ -34,9 +34,7 @@ pub const SLOT_2_VER_ADDR: u32 = 0x08020000;
 pub const UPDATER_ADDR: u32 = 0x08008000;
 pub const PATCH_ADDR: u32 = 0x08040000;
 pub const BACKUP_ADDR: u32 = 0x08060000;
-pub const SLOT_1_APP_LOADER_ADDR: u32 = 0x08004000;
 
-/// XMODEM state machine states
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum XmodemState {
     WaitHeaderByte,
@@ -67,13 +65,6 @@ pub enum XmodemError {
     HeaderCheckFailed,      // General header check failed
 }
 
-/// Update type (full or patch)
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub enum UpdateType {
-    FullUpdate,
-    PatchUpdate,
-}
-
 pub trait FlashOperations {
     fn erase(&self, address: u32) -> Result<(), XmodemError>;
     fn write(&self, address: u32, data: &[u8]) -> Result<(), XmodemError>;
@@ -87,7 +78,6 @@ pub trait CryptoOperations {
     fn finish_decryption(&mut self) -> Result<(), XmodemError>;
 }
 
-/// XMODEM receiver for handling firmware updates
 pub struct XmodemReceiver<F: FlashOperations, C: CryptoOperations> {
     pub state: XmodemState,
     pub packet_index: u8,
@@ -103,7 +93,6 @@ pub struct XmodemReceiver<F: FlashOperations, C: CryptoOperations> {
     pub current_address: u32,
     pub file_size: u32,
     pub bytes_received: u32,
-    pub update_type: UpdateType,
     pub first_packet_complete: bool,
     
     // Image header verification
@@ -112,17 +101,13 @@ pub struct XmodemReceiver<F: FlashOperations, C: CryptoOperations> {
     
     // Encryption state
     pub key: [u8; 16],
-    pub nonce: [u8; NONCE_SIZE],
+    pub nonce: [u8; 12],
     pub auth_tag: [u8; AUTH_TAG_SIZE],
-    pub calculated_tag: [u8; AUTH_TAG_SIZE],
     pub aad_header: [u8; 16],
     
     // Tracking variables
     data_counter: usize,
     total_packet_count: u32,
-    remaining_encrypted_length: u32,
-    remaining_packets: u32,
-    remaining_bytes_in_last_packet: u32,
     
     // External dependencies
     flash: F,
@@ -130,14 +115,7 @@ pub struct XmodemReceiver<F: FlashOperations, C: CryptoOperations> {
 }
 
 impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
-    /// Create a new XmodemReceiver
-    pub fn new(target_address: u32, update_type: UpdateType, flash: F, crypto: C) -> Self {
-        // Define expected image type based on update type
-        let expected_image_type = match update_type {
-            UpdateType::FullUpdate => IMAGE_TYPE_APP,
-            UpdateType::PatchUpdate => IMAGE_TYPE_UPDATER,
-        };
-        
+    pub fn new(target_address: u32, expected_image_type: u8, flash: F, crypto: C) -> Self {
         Self {
             state: XmodemState::WaitHeaderByte,
             packet_index: 0,
@@ -152,10 +130,8 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
             current_address: target_address,
             file_size: 0,
             bytes_received: 0,
-            update_type,
             first_packet_complete: false,
             
-            // Fields for header verification
             expected_image_type,
             header_verified: false,
             
@@ -163,26 +139,19 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
                 0xAC, 0x00, 0xD6, 0x7F, 0x21, 0xD2, 0x94, 0x46,
                 0x2F, 0x2A, 0xB6, 0x84, 0xE2, 0xE7, 0x83, 0xF7
             ],
-            nonce: [0x76, 0x4c, 0x10, 0x12, 0x61, 0x75, 0xc3, 0xa1, 0xc3, 0x94, 0x5f, 0x06],
+            nonce: [0; 12],
             auth_tag: [0; AUTH_TAG_SIZE],
-            calculated_tag: [0; AUTH_TAG_SIZE],
-            aad_header: [
-                0x02, 0x00, 0x07, 0x07, 0x60, 0x61, 0x5F, 0x6B,
-                0x65, 0x73, 0x01, 0x00, 0x00, 0x01, 0xFF, 0xFF
-            ],
+            aad_header: [0; 16],
             
             data_counter: 0,
             total_packet_count: 0,
-            remaining_encrypted_length: 0,
-            remaining_packets: 0,
-            remaining_bytes_in_last_packet: 0,
             
             flash,
             crypto,
         }
     }
     
-    /// Calculate CRC16 for XMODEM (CCITT polynomial)
+    // CRC16 for XMODEM
     pub fn calculate_crc16(&self, data: &[u8]) -> u16 {
         let mut crc: u16 = 0;
         for &byte in data.iter() {
@@ -198,9 +167,13 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
         crc
     }
 
-    /// Prepare the AAD header with firmware version information
+    // Prepare AAD
     pub fn prepare_header(&mut self) -> Result<(), XmodemError> {
-        // In a real implementation, update the AAD header with version info
+        self.aad_header = [
+            0x02, 0x00, 0x07, 0x07, 0x60, 0x61, 0x5F, 0x6B,
+            0x65, 0x79, 0x01, 0x00, 0x00, 0x01, 0xFF, 0xFF
+        ];
+        
         if let Some(backup_header) = self.get_backup_version() {
             // Update AAD header with backup version
             self.aad_header[12] = backup_header.version_major;
@@ -232,7 +205,7 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
         }
     }
     
-    /// Verify image header before erasing flash
+    /// Verify image header before accepting firmware
     fn verify_image_header(&self, header_data: &[u8]) -> Result<(), XmodemError> {
         if header_data.len() < size_of::<ImageHeader>() {
             return Err(XmodemError::HeaderCheckFailed);
@@ -277,18 +250,7 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
         if let Some(current_header) = current_header {
             if current_header.image_magic == expected_magic {
                 // Check version
-                if header.version_major < current_header.version_major {
-                    return Err(XmodemError::OlderVersion);
-                }
-                
-                if header.version_major == current_header.version_major && 
-                   header.version_minor < current_header.version_minor {
-                    return Err(XmodemError::OlderVersion);
-                }
-                
-                if header.version_major == current_header.version_major && 
-                   header.version_minor == current_header.version_minor &&
-                   header.version_patch <= current_header.version_patch {
+                if !header.is_newer_than(&current_header) {
                     return Err(XmodemError::OlderVersion);
                 }
             }
@@ -418,26 +380,23 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
             // At this point, header is verified - we can erase the target flash
             self.flash.erase(self.target_address)?;
             
-            // Extract nonce and file size from the first packet
-            self.nonce.copy_from_slice(&self.buffer[header_offset..(header_offset + NONCE_SIZE)]);
-            
-            // Extract file size (encrypted data + tag)
-            self.file_size = self.extract_size(header_offset + NONCE_SIZE);
-            
-            // Check file size limit (adjust this limit as needed)
-            if self.file_size > 262144 {
-                return Err(XmodemError::FileSizeTooLarge);
+            // Extract nonce from the first packet (immediately after header)
+            let nonce_offset = header_offset + IMAGE_HEADER_SIZE;
+            if nonce_offset + NONCE_SIZE > self.packet_size + 3 {
+                return Err(XmodemError::BufferOverflow);
             }
+            self.nonce.copy_from_slice(&self.buffer[nonce_offset..(nonce_offset + NONCE_SIZE)]);
             
-            // Calculate total encrypted length (excluding authentication tag)
-            self.remaining_encrypted_length = self.file_size - (AUTH_TAG_SIZE as u32);
+            // Extract file size (after nonce)
+            let size_offset = nonce_offset + NONCE_SIZE;
+            if size_offset + FILE_SIZE_FIELD > self.packet_size + 3 {
+                return Err(XmodemError::BufferOverflow);
+            }
+            self.file_size = self.extract_size(size_offset);
             
-            // Calculate total packets and remaining bytes
-            self.remaining_packets = (self.file_size + (NONCE_SIZE as u32) + (FILE_SIZE_FIELD as u32)) / (self.packet_size as u32);
-            self.remaining_bytes_in_last_packet = (self.file_size + (NONCE_SIZE as u32) + (FILE_SIZE_FIELD as u32)) % (self.packet_size as u32);
-            
-            if self.remaining_bytes_in_last_packet != 0 {
-                self.remaining_packets += 1;
+            // Check file size limit
+            if self.file_size > 262144 { // 256KB
+                return Err(XmodemError::FileSizeTooLarge);
             }
             
             // Update AAD header with current firmware version
@@ -450,8 +409,12 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
             self.flash.write(self.target_address, &header_data_copy)?;
             
             // Process the data part in the first packet
-            let data_offset = header_offset + IMAGE_HEADER_SIZE;
-            let data_len = self.packet_size - IMAGE_HEADER_SIZE;
+            let data_offset = nonce_offset + NONCE_SIZE + FILE_SIZE_FIELD;
+            let data_len = if data_offset < self.packet_size + 3 {
+                self.packet_size + 3 - data_offset
+            } else {
+                0
+            };
             
             if data_len > 0 {
                 // Decrypt first packet data
@@ -461,13 +424,16 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
                 )?;
                 
                 // Write the decrypted data to flash
-                self.flash.write(
-                    self.target_address + (IMAGE_HEADER_SIZE as u32),
-                    &self.data_buffer[..decrypted_len]
-                )?;
-                
-                self.current_address = self.target_address + (IMAGE_HEADER_SIZE as u32) + (decrypted_len as u32);
-                self.bytes_received = decrypted_len as u32;
+                if decrypted_len > 0 {
+                    let write_address = self.target_address + (IMAGE_HEADER_SIZE as u32);
+                    self.flash.write(write_address, &self.data_buffer[..decrypted_len])?;
+                    
+                    self.current_address = write_address + (decrypted_len as u32);
+                    self.bytes_received = decrypted_len as u32;
+                } else {
+                    self.current_address = self.target_address + (IMAGE_HEADER_SIZE as u32);
+                    self.bytes_received = 0;
+                }
             } else {
                 self.current_address = self.target_address + (IMAGE_HEADER_SIZE as u32);
                 self.bytes_received = 0;
@@ -482,50 +448,57 @@ impl<F: FlashOperations, C: CryptoOperations> XmodemReceiver<F, C> {
                     self.flash.erase(self.current_address)?;
                 }
                 
-                // Process the last packet differently if it contains authentication tag
-                if self.remaining_packets == 1 && self.remaining_bytes_in_last_packet > 0 {
-                    let data_len = self.remaining_bytes_in_last_packet as usize - AUTH_TAG_SIZE;
-                    
-                    // Decrypt data part
-                    if data_len > 0 {
-                        let decrypted_len = self.crypto.decrypt_chunk(
-                            &self.buffer[3..(3 + data_len)],
-                            &mut self.data_buffer
-                        )?;
-                        
-                        // Write to flash
-                        self.flash.write(self.current_address, &self.data_buffer[..decrypted_len])?;
-                        self.current_address += decrypted_len as u32;
-                    }
+                // Regular data packet
+                let data_offset = 3; // SOH/STX + SEQ + ~SEQ
+                let data_len = self.packet_size;
+                
+                // Check if this is the last packet (contains auth tag)
+                let remaining_bytes = self.file_size as usize - self.bytes_received as usize;
+                
+                if remaining_bytes <= self.packet_size {
+                    // Last packet - contains authentication tag
+                    let auth_offset = data_offset + remaining_bytes - AUTH_TAG_SIZE;
                     
                     // Extract authentication tag
-                    self.auth_tag.copy_from_slice(&self.buffer[3 + data_len..(3 + data_len + AUTH_TAG_SIZE)]);
-                    
-                    // Verify authentication tag
-                    self.crypto.verify_tag(&self.auth_tag)?;
-                    
-                    // Finish decryption
-                    self.crypto.finish_decryption()?;
+                    if auth_offset + AUTH_TAG_SIZE <= data_offset + data_len {
+                        self.auth_tag.copy_from_slice(&self.buffer[auth_offset..(auth_offset + AUTH_TAG_SIZE)]);
+                        
+                        // Decrypt data part (excluding auth tag)
+                        if auth_offset > data_offset {
+                            let data_part_len = auth_offset - data_offset;
+                            let decrypted_len = self.crypto.decrypt_chunk(
+                                &self.buffer[data_offset..auth_offset],
+                                &mut self.data_buffer
+                            )?;
+                            
+                            // Write to flash
+                            if decrypted_len > 0 {
+                                self.flash.write(self.current_address, &self.data_buffer[..decrypted_len])?;
+                                self.current_address += decrypted_len as u32;
+                                self.bytes_received += decrypted_len as u32;
+                            }
+                        }
+                        
+                        // Verify authentication tag
+                        self.crypto.verify_tag(&self.auth_tag)?;
+                        
+                        // Finish decryption
+                        self.crypto.finish_decryption()?;
+                    } else {
+                        return Err(XmodemError::BufferOverflow);
+                    }
                 } else {
-                    // Regular packet processing
-                    let data_len = self.packet_size;
+                    // Regular packet - decrypt and write
                     let decrypted_len = self.crypto.decrypt_chunk(
-                        &self.buffer[3..(3 + data_len)],
+                        &self.buffer[data_offset..(data_offset + data_len)],
                         &mut self.data_buffer
                     )?;
                     
                     // Write the data to flash
-                    self.flash.write(self.current_address, &self.data_buffer[..decrypted_len])?;
-                    self.current_address += decrypted_len as u32;
-                    self.bytes_received += decrypted_len as u32;
-                    
-                    // Update remaining counters
-                    if self.remaining_encrypted_length >= decrypted_len as u32 {
-                        self.remaining_encrypted_length -= decrypted_len as u32;
-                    }
-                    
-                    if self.remaining_packets > 0 {
-                        self.remaining_packets -= 1;
+                    if decrypted_len > 0 {
+                        self.flash.write(self.current_address, &self.data_buffer[..decrypted_len])?;
+                        self.current_address += decrypted_len as u32;
+                        self.bytes_received += decrypted_len as u32;
                     }
                 }
             } else {
