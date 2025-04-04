@@ -14,7 +14,8 @@ use cortex_m_rt::{entry, exception};
 use stm32f4::{self as pac, Peripherals, Usart2};
 use misc::{
     ring_buffer::RingBuffer,
-    image::{ImageHeader, SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER}
+    image::{ImageHeader, SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER},
+    systick,
 };
 
 #[no_mangle]
@@ -58,9 +59,6 @@ const UPDATER_ADDR: u32 = 0x08008000;
 const SLOT_2_VER_ADDR: u32 = 0x08020000;
 const BOOT_TIMEOUT_MS: u32 = 10_000; // 10 sec
 
-// systick counter
-static TICK_MS: AtomicU32 = AtomicU32::new(0);
-
 // pointer wrappers
 struct PeripheralPtr<T>(*const T);
 unsafe impl<T> Send for PeripheralPtr<T> {}
@@ -103,10 +101,10 @@ fn main() -> ! {
     setup_system_clock(&p);
 
     // get current time
-    let current_ms: u32 = TICK_MS.load(Ordering::Relaxed);
+    let current_ms: u32 = systick::get_tick_ms();
     START_TIME.get(|time: &mut u32| *time = current_ms);
 
-    setup_systick(&mut cp.SYST);
+    systick::setup_systick(&mut cp.SYST);
 
     setup_gpio(&p);
 
@@ -142,7 +140,7 @@ fn main() -> ! {
         }
 
         // check timeout
-        let current_ms: u32 = TICK_MS.load(Ordering::Relaxed);
+        let current_ms: u32 = systick::get_tick_ms();
         let start_ms: u32 = START_TIME.get(|time: &mut u32| *time);
         if (current_ms - start_ms) >= BOOT_TIMEOUT_MS {
             queue_string("\r\nTimeout reached. Booting application...\r\n");
@@ -209,14 +207,6 @@ fn setup_system_clock(p: &Peripherals) {
     while !p.rcc.cfgr().read().sws().is_pll() {
         // wait
     }
-}
-
-fn setup_systick(syst: &mut SYST) {
-    syst.set_clock_source(cortex_m::peripheral::syst::SystClkSource::Core);
-    syst.set_reload(90_000  - 1);
-    syst.clear_current();
-    syst.enable_counter();
-    syst.enable_interrupt();
 }
 
 fn setup_gpio(p: &Peripherals) {
@@ -661,8 +651,7 @@ pub extern "C" fn USART2() {
 
 #[exception]
 fn SysTick() {
-    let current: u32 = TICK_MS.load(Ordering::Relaxed);
-    TICK_MS.store(current + 1, Ordering::Relaxed);
+    systick::increment_tick();
 }
 
 #[exception]
