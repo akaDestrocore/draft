@@ -47,6 +47,7 @@ pub enum XmodemError {
     Timeout,        // Timeout during transfer
     FlashError,     // Error writing to flash
     InvalidPacket,  // Invalid packet structure
+    EOT,            // End of Transmission (special internal signal)
 }
 
 /// Calculate CRC16 for the given data
@@ -311,14 +312,17 @@ pub fn send_nak(tx_buffer: &mut RingBuffer) {
 /// This function implements the XMODEM-1K protocol to receive firmware updates.
 /// It validates the magic number and version of the incoming firmware before
 /// writing it to flash memory.
-pub fn receive_firmware(
+pub fn receive_firmware<T>(
     rx_buffer: &mut RingBuffer,
     tx_buffer: &mut RingBuffer,
     target_address: u32,
     expected_magic: u32,
-    slot_size: usize,
-    transmit_fn: fn(&mut RingBuffer),
-) -> Result<(), XmodemError> {
+    max_size: u32,
+    mut transmit_fn: T
+) -> Result<(), XmodemError> 
+where 
+    T: FnMut(&mut RingBuffer)
+{
     // XMODEM state variables
     let mut state = XmodemState::WaitHeader;
     let mut prev_index1: u8 = 0;
@@ -425,7 +429,7 @@ pub fn receive_firmware(
                             current_address += current_packet_size as u32;
                             
                             // Ensure we don't exceed the slot size
-                            if (current_address - target_address) as usize > slot_size {
+                            if (current_address - target_address) as usize > max_size as usize {
                                 send_cancel(tx_buffer)?;
                                 transmit_fn(tx_buffer);
                                 return Err(XmodemError::FlashError);
@@ -472,7 +476,7 @@ pub fn receive_firmware(
 
 /// Helper function to print transfer status
 pub fn print_error_message(err: XmodemError, tx_buffer: &mut RingBuffer, transmit_fn: fn(&mut RingBuffer)) {
-    let error_msg = match err {
+    let error_msg: &str = match err {
         XmodemError::Crc => "CRC error in transfer!\r\n",
         XmodemError::PacketNumber => "Packet number error in transfer!\r\n",
         XmodemError::Canceled => "Transfer was canceled!\r\n",
@@ -481,31 +485,11 @@ pub fn print_error_message(err: XmodemError, tx_buffer: &mut RingBuffer, transmi
         XmodemError::Timeout => "Timeout during transfer!\r\n",
         XmodemError::FlashError => "Error writing to flash memory!\r\n",
         XmodemError::InvalidPacket => "Invalid packet received!\r\n",
+        XmodemError::EOT => "Unexpected error (EOT)!\r\n", // This should never happen externally
     };
     
-    // Send the error message through UART
     for &byte in error_msg.as_bytes() {
         tx_buffer.write(byte);
     }
     transmit_fn(tx_buffer);
-}
-
-/// Extension method for RingBuffer to peek at first byte without removing it
-pub trait RingBufferExt {
-    fn peek(&self) -> Option<u8>;
-}
-
-impl RingBufferExt for RingBuffer {
-    fn peek(&self) -> Option<u8> {
-        if self.is_empty() {
-            None
-        } else {
-            unsafe {
-                // RingBuffer implementation should store head, tail and buffer as fields
-                let tail = *self.tail.get();
-                let buffer = &*self.buffer.get();
-                Some(buffer[tail])
-            }
-        }
-    }
 }

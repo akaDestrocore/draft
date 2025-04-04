@@ -738,7 +738,7 @@ fn update_firmware() {
             }
         },
         Err(err) => {
-            let error_msg = match err {
+            let error_msg: &str = match err {
                 XmodemError::Crc => "\r\nCRC error in transfer!\r\n",
                 XmodemError::PacketNumber => "\r\nPacket number error in transfer!\r\n",
                 XmodemError::Canceled => "\r\nTransfer was canceled!\r\n",
@@ -747,6 +747,7 @@ fn update_firmware() {
                 XmodemError::Timeout => "\r\nTimeout during transfer!\r\n",
                 XmodemError::FlashError => "\r\nError writing to flash memory!\r\n",
                 XmodemError::InvalidPacket => "\r\nInvalid packet received!\r\n",
+                XmodemError::EOT => "\r\nUnexpected end of transmission!\r\n",
             };
             
             queue_string(error_msg);
