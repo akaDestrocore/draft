@@ -741,10 +741,13 @@ fn update_firmware() {
         flash::erase_sector(&p, SLOT_2_VER_ADDR + 0x20000); // Next sector
     }
     
-    // Function to ensure transmission is ongoing
-    let transmit_fn = |tx_buf: &mut RingBuffer| {
+    // Отправляем сигнал о готовности к приему
+    queue_string("\r\nReady to receive. Start your XMODEM transfer now...\r\n");
+    
+    // Wait for all message to be sent
+    while TX_IN_PROGRESS.load(Ordering::SeqCst) {
         ensure_transmitting();
-    };
+    }
     
     // Start receiving firmware
     let result = TX_BUFFER.get(|tx_buf| {
@@ -755,7 +758,7 @@ fn update_firmware() {
                 target_address,
                 expected_magic,
                 slot_size,
-                transmit_fn
+                |buf| ensure_transmitting() // Simplified transmit function
             )
         })
     });
