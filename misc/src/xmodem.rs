@@ -1,16 +1,18 @@
 #![no_std]
 
 use core::{
-    cell::RefCell,
     fmt, 
     mem,
-    sync::atomic::{AtomicBool, Ordering}
 };
 use crate::ring_buffer::RingBuffer;
 use crate::image::ImageHeader;
 use crate::flash;
 use crate::systick;
-use rmodem::{Xmodem, XmodemConfig, XmodemVariant};
+use rmodem::{
+    Control, Error as RmodemError, Protocol, Result as RmodemResult, Sequence, 
+    XmodemData, XmodemPacket, OneKData, XmodemOneKPacket, XmodemCrcPacket,
+    ACK, CAN, EOT, IDLE, NAK, SOH, STX
+};
 use stm32f4 as pac;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,101 +45,14 @@ impl fmt::Display for XmodemError {
 }
 
 // Convert rmodem errors to our custom errors
-impl From<rmodem::Error> for XmodemError {
-    fn from(error: rmodem::Error) -> Self {
+impl From<RmodemError> for XmodemError {
+    fn from(error: RmodemError) -> Self {
         match error {
-            rmodem::Error::Crc => XmodemError::Crc,
-            rmodem::Error::Sequence => XmodemError::PacketNumber,
-            rmodem::Error::Cancelled => XmodemError::Canceled,
-            rmodem::Error::Timeout => XmodemError::Timeout,
-            rmodem::Error::Unknown => XmodemError::InvalidPacket,
+            RmodemError::ChecksumMismatch => XmodemError::Crc,
+            RmodemError::SequenceMismatch => XmodemError::PacketNumber,
+            RmodemError::Cancelled => XmodemError::Canceled,
             _ => XmodemError::InvalidPacket,
         }
-    }
-}
-
-// Адаптер для нашего RingBuffer, чтобы работать с rmodem
-struct RingBufferAdapter<'a, F>
-where
-    F: FnMut(&mut RingBuffer) + 'a,
-{
-    rx_buffer: &'a mut RingBuffer,
-    tx_buffer: &'a mut RingBuffer,
-    transmit_fn: &'a mut F,
-    last_rx_check: u32,
-}
-
-impl<'a, F> rmodem::Serial for RingBufferAdapter<'a, F>
-where
-    F: FnMut(&mut RingBuffer),
-{
-    type Error = XmodemError;
-
-    fn read_timeout(&mut self, buf: &mut [u8], timeout_ms: u32) -> Result<usize, Self::Error> {
-        let start_ms = systick::get_tick_ms();
-        let mut bytes_read = 0;
-        
-        while bytes_read < buf.len() {
-            // Запускаем обработчик передачи для поддержания обмена данными
-            (self.transmit_fn)(self.tx_buffer);
-            
-            if let Some(byte) = self.rx_buffer.read() {
-                buf[bytes_read] = byte;
-                bytes_read += 1;
-                // Сбрасываем время для следующего таймаута, т.к. получили данные
-                self.last_rx_check = systick::get_tick_ms();
-            } else {
-                // Проверяем таймаут только если не читаем данные
-                let current_ms = systick::get_tick_ms();
-                if bytes_read == 0 && current_ms.wrapping_sub(self.last_rx_check) >= timeout_ms {
-                    // Полный таймаут только если ничего не прочитали
-                    return Err(XmodemError::Timeout);
-                } else if bytes_read > 0 {
-                    // Если что-то прочитали, возвращаем это
-                    break;
-                }
-                
-                // Небольшая задержка, чтобы не перегружать процессор
-                cortex_m::asm::delay(1000);
-            }
-            
-            // Защита от бесконечного цикла - общий таймаут
-            if systick::get_tick_ms().wrapping_sub(start_ms) > timeout_ms * 3 {
-                if bytes_read > 0 {
-                    break;
-                }
-                return Err(XmodemError::Timeout);
-            }
-        }
-        
-        Ok(bytes_read)
-    }
-
-    fn write(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
-        for &byte in buf {
-            if !self.tx_buffer.write(byte) {
-                return Err(XmodemError::InvalidPacket);
-            }
-        }
-        
-        // Запускаем обработчик передачи
-        (self.transmit_fn)(self.tx_buffer);
-        
-        Ok(())
-    }
-    
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        // Запускаем обработчик передачи для отправки всех данных
-        (self.transmit_fn)(self.tx_buffer);
-        
-        // Ждем небольшую задержку для уверенности, что данные отправлены
-        let start_ms = systick::get_tick_ms();
-        while !self.tx_buffer.is_empty() && systick::get_tick_ms().wrapping_sub(start_ms) < 100 {
-            (self.transmit_fn)(self.tx_buffer);
-            cortex_m::asm::delay(1000);
-        }
-        
-        Ok(())
     }
 }
 
@@ -155,19 +70,7 @@ where
     // Очищаем буферы перед началом передачи
     rx_buf.clear();
     
-    let mut adapter = RingBufferAdapter {
-        rx_buffer: rx_buf,
-        tx_buffer: tx_buf,
-        transmit_fn: &mut transmit_fn,
-        last_rx_check: systick::get_tick_ms(),
-    };
-    
-    // Конфигурация для XMODEM-1K
-    let config = XmodemConfig::new(XmodemVariant::Xmodem1k);
-    let mut xmodem = Xmodem::new(&config);
-    
-    // Буфер для хранения принятых пакетов (1K + запас)
-    let mut buffer = [0u8; 1024];
+    // Буфер для хранения принятых пакетов
     let mut total_bytes_received = 0;
     let mut flash_addr = target_address;
     
@@ -177,88 +80,267 @@ where
     // Начинаем передачу
     let mut header_received = false;
     let mut image_header = ImageHeader::new(0, 0, 0, 0, 0);
+    let mut sequence = Sequence::new();
     
-    // Отправляем NAK для начала передачи
-    adapter.write(&[0x15])?; // NAK для стандартного XMODEM
+    // Отправляем 'C' для начала передачи с XMODEM-CRC или XMODEM-1K
+    tx_buf.write(IDLE);
+    transmit_fn(tx_buf);
     
+    // Таймаут для начала передачи - 30 секунд
+    let start_ms = systick::get_tick_ms();
+    let timeout_ms = 30000;
+    
+    // Основной цикл приема данных
     while total_bytes_received < slot_size {
-        // Обрабатываем передачу данных
+        // Обработка передачи
         transmit_fn(tx_buf);
         
-        // Принимаем пакет
-        let receive_result = xmodem.receive_packet(&mut adapter, &mut buffer);
+        // Проверяем, есть ли данные для чтения
+        if rx_buf.is_empty() {
+            // Проверяем таймаут
+            if systick::get_tick_ms().wrapping_sub(start_ms) > timeout_ms {
+                return Err(XmodemError::Timeout);
+            }
+            
+            // Небольшая задержка, чтобы не перегружать процессор
+            cortex_m::asm::nop();
+            continue;
+        }
         
-        match receive_result {
-            Ok(bytes) => {
-                if bytes == 0 {
-                    // EOT получен, передача завершена
-                    break;
+        // Определяем тип пакета по первому байту
+        let first_byte = match rx_buf.peek() {
+            Some(byte) => byte,
+            None => continue,
+        };
+        
+        match first_byte {
+            SOH => {
+                // Стандартный пакет XMODEM (128 байт)
+                if rx_buf.len() < 132 { // SOH + seq + ~seq + 128 data + 2 CRC
+                    continue; // Ждем полный пакет
                 }
                 
-                // Первый пакет должен содержать заголовок образа
-                if !header_received && bytes >= mem::size_of::<ImageHeader>() {
-                    // Копируем заголовок
-                    let mut header_bytes = [0u8; mem::size_of::<ImageHeader>()];
-                    header_bytes.copy_from_slice(&buffer[..mem::size_of::<ImageHeader>()]);
-                    
-                    // Парсим заголовок
-                    unsafe {
-                        image_header = core::ptr::read(header_bytes.as_ptr() as *const ImageHeader);
-                    }
-                    
-                    // Проверяем magic number
-                    if image_header.image_magic != expected_magic {
-                        return Err(XmodemError::InvalidMagic);
-                    }
-                    
-                    // Проверяем, что версия новее (если имеющаяся прошивка присутствует)
-                    if target_address != flash::FLASH_BASE {
-                        let mut current_header_bytes = [0u8; mem::size_of::<ImageHeader>()];
-                        flash::read(target_address, &mut current_header_bytes);
-                        
-                        let current_header: ImageHeader = unsafe {
-                            core::ptr::read(current_header_bytes.as_ptr() as *const ImageHeader)
-                        };
-                        
-                        if current_header.is_valid() && !image_header.is_newer_than(&current_header) {
-                            return Err(XmodemError::OlderVersion);
+                // Подготовка данных для парсинга пакета
+                let mut packet_bytes = [0u8; 132];
+                for i in 0..132 {
+                    packet_bytes[i] = match rx_buf.read() {
+                        Some(byte) => byte,
+                        None => return Err(XmodemError::InvalidPacket),
+                    };
+                }
+                
+                // Проверка и обработка пакета
+                match XmodemCrcPacket::from_bytes(&packet_bytes) {
+                    Ok(packet) => {
+                        // Проверка последовательности пакетов
+                        if packet.sequence() != sequence {
+                            // Отправляем NAK для переповтора пакета
+                            tx_buf.write(NAK);
+                            transmit_fn(tx_buf);
+                            continue;
                         }
+                        
+                        // Получаем данные
+                        let data = packet.data().as_ref();
+                        
+                        // Обработка первого пакета с заголовком
+                        if !header_received && total_bytes_received == 0 {
+                            if data.len() >= mem::size_of::<ImageHeader>() {
+                                // Копируем заголовок
+                                let mut header_bytes = [0u8; mem::size_of::<ImageHeader>()];
+                                header_bytes.copy_from_slice(&data[..mem::size_of::<ImageHeader>()]);
+                                
+                                // Парсим заголовок
+                                unsafe {
+                                    image_header = core::ptr::read(header_bytes.as_ptr() as *const ImageHeader);
+                                }
+                                
+                                // Проверяем magic number
+                                if image_header.image_magic != expected_magic {
+                                    // Отменяем передачу
+                                    tx_buf.write(CAN);
+                                    tx_buf.write(CAN);
+                                    transmit_fn(tx_buf);
+                                    return Err(XmodemError::InvalidMagic);
+                                }
+                                
+                                // Проверяем, что версия новее
+                                if target_address != flash::FLASH_BASE {
+                                    let mut current_header_bytes = [0u8; mem::size_of::<ImageHeader>()];
+                                    flash::read(target_address, &mut current_header_bytes);
+                                    
+                                    let current_header: ImageHeader = unsafe {
+                                        core::ptr::read(current_header_bytes.as_ptr() as *const ImageHeader)
+                                    };
+                                    
+                                    if current_header.is_valid() && !image_header.is_newer_than(&current_header) {
+                                        // Отменяем передачу
+                                        tx_buf.write(CAN);
+                                        tx_buf.write(CAN);
+                                        transmit_fn(tx_buf);
+                                        return Err(XmodemError::OlderVersion);
+                                    }
+                                }
+                                
+                                header_received = true;
+                            }
+                        }
+                        
+                        // Записываем данные во флеш
+                        if flash::write(&p, data, flash_addr) != 0 {
+                            // Отменяем передачу при ошибке записи
+                            tx_buf.write(CAN);
+                            tx_buf.write(CAN);
+                            transmit_fn(tx_buf);
+                            return Err(XmodemError::FlashError);
+                        }
+                        
+                        // Обновляем адрес и счетчик
+                        flash_addr += data.len() as u32;
+                        total_bytes_received += data.len() as u32;
+                        
+                        // Инкрементируем последовательность
+                        sequence.increment();
+                        
+                        // Отправляем ACK
+                        tx_buf.write(ACK);
+                        transmit_fn(tx_buf);
+                    },
+                    Err(_) => {
+                        // Ошибка в пакете - отправляем NAK
+                        tx_buf.write(NAK);
+                        transmit_fn(tx_buf);
                     }
-                    
-                    header_received = true;
+                }
+            },
+            STX => {
+                // Пакет XMODEM-1K (1024 байт)
+                if rx_buf.len() < 1029 { // STX + seq + ~seq + 1024 data + 2 CRC
+                    continue; // Ждем полный пакет
                 }
                 
-                // Записываем данные во флеш
-                if flash::write(&p, &buffer[..bytes], flash_addr) != 0 {
-                    return Err(XmodemError::FlashError);
+                // Подготовка данных для парсинга пакета
+                let mut packet_bytes = [0u8; 1029];
+                for i in 0..1029 {
+                    packet_bytes[i] = match rx_buf.read() {
+                        Some(byte) => byte,
+                        None => return Err(XmodemError::InvalidPacket),
+                    };
                 }
                 
-                flash_addr += bytes as u32;
-                total_bytes_received += bytes as u32;
+                // Проверка и обработка пакета
+                match XmodemOneKPacket::from_bytes(&packet_bytes) {
+                    Ok(packet) => {
+                        // Проверка последовательности пакетов
+                        if packet.sequence() != sequence {
+                            // Отправляем NAK для переповтора пакета
+                            tx_buf.write(NAK);
+                            transmit_fn(tx_buf);
+                            continue;
+                        }
+                        
+                        // Получаем данные
+                        let data = packet.data().as_ref();
+                        
+                        // Обработка первого пакета с заголовком
+                        if !header_received && total_bytes_received == 0 {
+                            if data.len() >= mem::size_of::<ImageHeader>() {
+                                // Копируем заголовок
+                                let mut header_bytes = [0u8; mem::size_of::<ImageHeader>()];
+                                header_bytes.copy_from_slice(&data[..mem::size_of::<ImageHeader>()]);
+                                
+                                // Парсим заголовок
+                                unsafe {
+                                    image_header = core::ptr::read(header_bytes.as_ptr() as *const ImageHeader);
+                                }
+                                
+                                // Проверяем magic number
+                                if image_header.image_magic != expected_magic {
+                                    // Отменяем передачу
+                                    tx_buf.write(CAN);
+                                    tx_buf.write(CAN);
+                                    transmit_fn(tx_buf);
+                                    return Err(XmodemError::InvalidMagic);
+                                }
+                                
+                                // Проверяем, что версия новее
+                                if target_address != flash::FLASH_BASE {
+                                    let mut current_header_bytes = [0u8; mem::size_of::<ImageHeader>()];
+                                    flash::read(target_address, &mut current_header_bytes);
+                                    
+                                    let current_header: ImageHeader = unsafe {
+                                        core::ptr::read(current_header_bytes.as_ptr() as *const ImageHeader)
+                                    };
+                                    
+                                    if current_header.is_valid() && !image_header.is_newer_than(&current_header) {
+                                        // Отменяем передачу
+                                        tx_buf.write(CAN);
+                                        tx_buf.write(CAN);
+                                        transmit_fn(tx_buf);
+                                        return Err(XmodemError::OlderVersion);
+                                    }
+                                }
+                                
+                                header_received = true;
+                            }
+                        }
+                        
+                        // Записываем данные во флеш
+                        if flash::write(&p, data, flash_addr) != 0 {
+                            // Отменяем передачу при ошибке записи
+                            tx_buf.write(CAN);
+                            tx_buf.write(CAN);
+                            transmit_fn(tx_buf);
+                            return Err(XmodemError::FlashError);
+                        }
+                        
+                        // Обновляем адрес и счетчик
+                        flash_addr += data.len() as u32;
+                        total_bytes_received += data.len() as u32;
+                        
+                        // Инкрементируем последовательность
+                        sequence.increment();
+                        
+                        // Отправляем ACK
+                        tx_buf.write(ACK);
+                        transmit_fn(tx_buf);
+                    },
+                    Err(_) => {
+                        // Ошибка в пакете - отправляем NAK
+                        tx_buf.write(NAK);
+                        transmit_fn(tx_buf);
+                    }
+                }
+            },
+            EOT => {
+                // Конец передачи
+                rx_buf.read(); // Удаляем EOT из буфера
                 
-                // Обеспечиваем передачу буферизованных ответов
+                // Подтверждаем получение
+                tx_buf.write(ACK);
                 transmit_fn(tx_buf);
                 
-                // Небольшая задержка для стабильности
-                let start_ms = systick::get_tick_ms();
-                while systick::get_tick_ms().wrapping_sub(start_ms) < 5 {
-                    cortex_m::asm::nop();
-                }
-            },
-            Err(rmodem::Error::EndOfTransmission) => {
-                // Нормальное завершение передачи
+                // Передача завершена успешно
                 break;
             },
-            Err(err) => {
-                return Err(err.into());
+            CAN => {
+                // Отмена передачи от отправителя
+                rx_buf.read(); // Удаляем CAN из буфера
+                
+                // Проверяем, есть ли второй CAN (по протоколу)
+                if rx_buf.peek() == Some(CAN) {
+                    rx_buf.read(); // Удаляем второй CAN
+                    return Err(XmodemError::Canceled);
+                }
+            },
+            _ => {
+                // Неизвестный или неожиданный байт
+                rx_buf.read(); // Удаляем его из буфера
             }
         }
     }
     
-    // Завершаем передачу и отправляем ACK
-    adapter.write(&[0x06])?; // ACK
-    
-    // Очистка буферов
+    // Очищаем буферы
     rx_buf.clear();
     
     Ok(())
