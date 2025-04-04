@@ -38,8 +38,10 @@ const ACK: u8 = 0x06;  // Acknowledge
 const NAK: u8 = 0x15;  // Negative acknowledge
 const CAN: u8 = 0x18;  // Cancel transmission
 const CTRL_Z: u8 = 0x1A; // EOF marker
+const IDLE: u8 = 0x43;  // ASCII 'C' character to request XMODEM-1K
 
 const RECV_TIMEOUT_MS: u32 = 10000; // 10 seconds
+const IDLE_SEND_INTERVAL_MS: u32 = 1000; // Send 'C' every second
 
 // Convert rmodem error to our custom error type
 fn map_error(err: RmodemError) -> XmodemError {
@@ -65,8 +67,8 @@ pub fn receive_firmware(
     let mut received_bytes: u32 = 0;
     let mut buffer: [u8; 1024] = [0; 1024];
     
-    // Send initial NAK to start transfer
-    tx_buffer.write(NAK);
+    // Send initial 'C' to start transfer (for XMODEM-1K)
+    tx_buffer.write(IDLE);
     transmit_fn(tx_buffer);
     
     let mut header_buffer: [u8; 512] = [0; 512];
@@ -79,10 +81,21 @@ pub fn receive_firmware(
     
     // Main receive loop
     let start_time = systick::get_tick_ms();
+    let mut last_idle_time = start_time;
+    
     loop {
-        // Check for timeout
+        // Check for overall timeout
         if systick::wait_ms(start_time, RECV_TIMEOUT_MS) {
             return Err(XmodemError::Timeout);
+        }
+        
+        // Send 'C' character periodically until we receive data
+        let current_time = systick::get_tick_ms();
+        if rx_buffer.is_empty() && systick::wait_ms(last_idle_time, IDLE_SEND_INTERVAL_MS) {
+            tx_buffer.write(IDLE);
+            transmit_fn(tx_buffer);
+            last_idle_time = current_time;
+            continue;
         }
         
         // Wait for byte in rx_buffer

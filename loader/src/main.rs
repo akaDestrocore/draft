@@ -353,6 +353,23 @@ fn queue_string(s: &str) {
     ensure_transmitting();
 }
 
+// New function that ensures transmission is complete
+fn transmit_and_wait(tx_buf: &RingBuffer) {
+    // Initiate transmission
+    ensure_transmitting();
+    
+    // Wait for transmission to complete (with timeout)
+    let start_ms = systick::get_tick_ms();
+    while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+        if systick::wait_ms(start_ms, 100) { // 100 ms timeout
+            // Timeout - break waiting
+            break;
+        }
+        // Continue checking
+        asm::nop();
+    }
+}
+
 fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
     let is_app_valid: bool = unsafe {
         *(SLOT_2_VER_ADDR as *const u32) != 0xFFFFFFFF
@@ -741,7 +758,7 @@ fn update_firmware() {
         flash::erase_sector(&p, SLOT_2_VER_ADDR + 0x20000); // Next sector
     }
     
-    // Отправляем сигнал о готовности к приему
+    // Send ready signal
     queue_string("\r\nReady to receive. Start your XMODEM transfer now...\r\n");
     
     // Wait for all message to be sent
@@ -758,7 +775,7 @@ fn update_firmware() {
                 target_address,
                 expected_magic,
                 slot_size,
-                |buf| ensure_transmitting() // Simplified transmit function
+                transmit_and_wait // Use the new function
             )
         })
     });
@@ -812,76 +829,6 @@ fn update_firmware() {
     // Reset the timeout when returning to main menu
     let current_ms = systick::get_tick_ms();
     START_TIME.get(|time: &mut u32| *time = current_ms);
-}
-
-// Function to clear the screen
-fn clear_screen() {
-    queue_string("\x1B[2J");
-}
-
-// Function to set cursor position
-fn set_cursor_position(x: u32, y: u32) {
-    let mut pos_str: [u8; 10] = [0; 10];
-    let _ = core::fmt::write(&mut pos_str_writer(&mut pos_str), format_args!("\x1B[{};{}H", y, x));
-    
-    for &b in pos_str.iter() {
-        if b != 0 {
-            TX_BUFFER.get(|buf| buf.write(b));
-        }
-    }
-}
-
-// Helper to write to a string slice
-struct StrWriter<'a> {
-    buf: &'a mut [u8],
-    offset: usize,
-}
-
-impl<'a> StrWriter<'a> {
-    fn new(buf: &'a mut [u8]) -> Self {
-        Self { buf, offset: 0 }
-    }
-}
-
-impl<'a> core::fmt::Write for StrWriter<'a> {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        let bytes = s.as_bytes();
-        let len = bytes.len().min(self.buf.len() - self.offset);
-        self.buf[self.offset..self.offset + len].copy_from_slice(&bytes[..len]);
-        self.offset += len;
-        Ok(())
-    }
-}
-
-fn pos_str_writer<'a>(buf: &'a mut [u8]) -> StrWriter<'a> {
-    StrWriter::new(buf)
-}
-
-// Display message based on message type
-fn ShowMessage(msg: MESSAGE_t) {
-    match msg {
-        MESSAGE_t::PRINT_BOOT_LOADER => {
-            queue_string("\r\nBooting to application...\r\n");
-        },
-        MESSAGE_t::PRINT_OPTIONS => {
-            queue_string("\r\nPlease select an option:\r\n\r\n");
-            queue_string(" > 'U' --> Enter updater\r\n\r\n");
-            queue_string(" > 'F' --> Update firmware\r\n\r\n");
-            queue_string(" > 'ENTER' --> Regular boot\r\n");
-        },
-        MESSAGE_t::PRINT_UPD_FIRMWARE => {
-            queue_string("\r\nEntering firmware update mode...\r\n");
-        },
-        MESSAGE_t::PRINT_SEL_FIRMWARE => {
-            queue_string("\r\nWhich image would you like to update?\r\n\r\n");
-            queue_string("  'U' - Update Updater image\r\n");
-            queue_string("  'A' - Update Application image\r\n");
-            queue_string("  'X' - Cancel update\r\n\r\n");
-        },
-        MESSAGE_t::PRINT_ERROR => {
-            queue_string("\r\nAn error occurred!\r\n");
-        },
-    }
 }
 
 #[no_mangle]
