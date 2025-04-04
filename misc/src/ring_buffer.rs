@@ -25,19 +25,18 @@ impl RingBuffer {
     }
 
     pub fn write(&self, byte: u8) -> bool {
-        // This function is called from both main context and interrupt
         cortex_m::interrupt::free(|_| unsafe {
             let count: usize = *self.count.get();
             
             if count < RING_BUFFER_SIZE {
-                // Buffer has space
+                // buffer has space
                 let head: &mut usize = &mut *self.head.get();
                 let buffer = &mut *self.buffer.get();
                 
-                // Store byte at head position
+                // store byte at head position
                 buffer[*head] = byte;
                 
-                // Move head
+                // move head
                 *head = (*head + 1) % RING_BUFFER_SIZE;
                 
                 *self.count.get() += 1;
@@ -49,21 +48,20 @@ impl RingBuffer {
         })
     }
 
-    // Read a byte from the buffer
+    // read a byte from the buffer
     pub fn read(&self) -> Option<u8> {
-        // This function is called from both main context and interrupt
         cortex_m::interrupt::free(|_| unsafe {
             let count: usize = *self.count.get();
             
             if count > 0 {
-                // Buffer has data
+                // buffer has data
                 let tail: &mut usize = &mut *self.tail.get();
                 let buffer = &*self.buffer.get();
                 
-                // Read byte from tail position
-                let byte = buffer[*tail];
+                // read byte from tail
+                let byte: u8 = buffer[*tail];
                 
-                // Move tail
+                // move tail
                 *tail = (*tail + 1) % RING_BUFFER_SIZE;
                 
                 *self.count.get() -= 1;
@@ -75,28 +73,28 @@ impl RingBuffer {
         })
     }
 
-    // Check if the buffer is empty
+    // check if the buffer is empty
     pub fn is_empty(&self) -> bool {
         cortex_m::interrupt::free(|_| unsafe {
             *self.count.get() == 0
         })
     }
 
-    // Check if the buffer is full
+    // check if the buffer is full
     pub fn is_full(&self) -> bool {
         cortex_m::interrupt::free(|_| unsafe {
             *self.count.get() == RING_BUFFER_SIZE
         })
     }
 
-    // Get current number of bytes in the buffer
+    // get number of bytes in the buffer
     pub fn len(&self) -> usize {
         cortex_m::interrupt::free(|_| unsafe {
             *self.count.get()
         })
     }
 
-    // Clear the buffer
+    // clear the buffer
     pub fn clear(&self) {
         cortex_m::interrupt::free(|_| unsafe {
             *self.head.get() = 0;
@@ -105,4 +103,52 @@ impl RingBuffer {
         })
     }
 
+    // get tail position
+    pub fn get_tail(&self) -> usize {
+        cortex_m::interrupt::free(|_| unsafe {
+            *self.tail.get()
+        })
+    }
+
+    // get head position
+    pub fn get_head(&self) -> usize {
+        cortex_m::interrupt::free(|_| unsafe {
+            *self.head.get()
+        })
+    }
+
+    // get a byte from the buffer at a specific index without removing it
+    pub fn get_buffer_byte(&self, index: usize) -> u8 {
+        cortex_m::interrupt::free(|_| unsafe {
+            let buffer = &*self.buffer.get();
+            buffer[index % RING_BUFFER_SIZE]
+        })
+    }
+
+    // peek at the next byte without removing it
+    pub fn peek(&self) -> Option<u8> {
+        cortex_m::interrupt::free(|_| unsafe {
+            let count: usize = *self.count.get();
+            if count > 0 {
+                let tail: usize = *self.tail.get();
+                let buffer = &*self.buffer.get();
+                Some(buffer[tail])
+            } else {
+                None
+            }
+        })
+    }
+
+    // access raw buffer safely
+    pub fn with_raw_buffer<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&[u8], usize, usize) -> R
+    {
+        cortex_m::interrupt::free(|_| unsafe {
+            let buffer = &*self.buffer.get();
+            let tail: usize = *self.tail.get();
+            let head: usize = *self.head.get();
+            f(buffer, tail, head)
+        })
+    }
 }
