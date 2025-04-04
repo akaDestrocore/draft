@@ -40,7 +40,7 @@ const CAN: u8 = 0x18;  // Cancel transmission
 const CTRL_Z: u8 = 0x1A; // EOF marker
 const IDLE: u8 = 0x43;  // ASCII 'C' character to request XMODEM-1K
 
-const RECV_TIMEOUT_MS: u32 = 10000; // 10 seconds
+const RECV_TIMEOUT_MS: u32 = 30000; // 30 seconds
 const IDLE_SEND_INTERVAL_MS: u32 = 1000; // Send 'C' every second
 
 // Convert rmodem error to our custom error type
@@ -65,9 +65,8 @@ pub fn receive_firmware(
 ) -> Result<u32, XmodemError> {
     let mut sequence_num: u8 = 1;
     let mut received_bytes: u32 = 0;
-    let mut buffer: [u8; 1024] = [0; 1024];
     
-    // Send initial 'C' to start transfer (for XMODEM-1K)
+    // Send initial 'C' to start transfer
     tx_buffer.write(IDLE);
     transmit_fn(tx_buffer);
     
@@ -85,17 +84,17 @@ pub fn receive_firmware(
     
     loop {
         // Check for overall timeout
-        if systick::wait_ms(start_time, RECV_TIMEOUT_MS) {
+        let current_time = systick::get_tick_ms();
+        if current_time.wrapping_sub(start_time) >= RECV_TIMEOUT_MS {
             return Err(XmodemError::Timeout);
         }
         
         // Send 'C' character periodically until we receive data
-        let current_time = systick::get_tick_ms();
-        if rx_buffer.is_empty() && systick::wait_ms(last_idle_time, IDLE_SEND_INTERVAL_MS) {
+        // Direct time comparison instead of using wait_ms
+        if rx_buffer.is_empty() && current_time.wrapping_sub(last_idle_time) >= IDLE_SEND_INTERVAL_MS {
             tx_buffer.write(IDLE);
             transmit_fn(tx_buffer);
             last_idle_time = current_time;
-            continue;
         }
         
         // Wait for byte in rx_buffer
@@ -123,7 +122,8 @@ pub fn receive_firmware(
                 // Already read STX
                 let mut idx = 1;
                 while idx < 3 {
-                    if systick::wait_ms(header_start, RECV_TIMEOUT_MS) {
+                    let current = systick::get_tick_ms();
+                    if current.wrapping_sub(header_start) >= 5000 { // 5 sec timeout for header
                         return Err(XmodemError::Timeout);
                     }
                     
@@ -140,7 +140,8 @@ pub fn receive_firmware(
                 
                 let mut idx = 3;
                 while idx < XmodemOneKPacket::LEN {
-                    if systick::wait_ms(data_start, RECV_TIMEOUT_MS) {
+                    let current = systick::get_tick_ms();
+                    if current.wrapping_sub(data_start) >= 10000 { // 10 sec timeout for data
                         return Err(XmodemError::Timeout);
                     }
                     
@@ -231,6 +232,9 @@ pub fn receive_firmware(
                         
                         // Increment sequence number (it wraps automatically at 255)
                         sequence_num = sequence_num.wrapping_add(1);
+                        
+                        // Reset idle timer after successful packet
+                        last_idle_time = systick::get_tick_ms();
                     },
                     Err(e) => {
                         // Invalid packet

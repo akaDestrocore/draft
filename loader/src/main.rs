@@ -358,15 +358,18 @@ fn transmit_and_wait(tx_buf: &RingBuffer) {
     // Initiate transmission
     ensure_transmitting();
     
-    // Wait for transmission to complete (with timeout)
-    let start_ms = systick::get_tick_ms();
+    // Wait for transmission to complete or for a short fixed time
+    let mut wait_count = 0;
     while TX_IN_PROGRESS.load(Ordering::SeqCst) {
-        if systick::wait_ms(start_ms, 100) { // 100 ms timeout
-            // Timeout - break waiting
-            break;
+        wait_count += 1;
+        if wait_count > 10000 {  // Simple delay counter instead of relying on systick
+            break;  // Break after some time even if TX_IN_PROGRESS is still true
         }
-        // Continue checking
-        asm::nop();
+        
+        // Continue checking and give CPU some breathing room
+        for _ in 0..100 {
+            asm::nop();
+        }
     }
 }
 
