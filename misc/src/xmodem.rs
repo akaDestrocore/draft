@@ -251,7 +251,7 @@ pub fn extract_packet(
         }
         
         // Peek at first byte to determine packet type
-        let first_byte = match rx_buffer.peek() {
+        let first_byte: u8 = match rx_buffer.peek() {
             Some(byte) => byte,
             None => return Err(XmodemError::Timeout),
         };
@@ -265,7 +265,7 @@ pub fn extract_packet(
         }
         
         // Determine expected packet size
-        let expected_packet_size = if first_byte == SOH {
+        let expected_packet_size: usize = if first_byte == SOH {
             SMALL_TOTAL_SIZE
         } else if first_byte == STX {
             LARGE_TOTAL_SIZE
