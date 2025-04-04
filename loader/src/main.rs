@@ -643,8 +643,7 @@ fn process_input() {
 // Function to handle firmware updates
 fn update_firmware() {
     // Clear screen and set cursor position
-    queue_string("\033[2J");  // Clear screen
-    queue_string("\033[0;0H"); // Set cursor position
+    queue_string("\x1B[2J\x1B[H");
 
     // Ask which image to update
     queue_string("Which image would you like to update?\r\n\r\n");
@@ -682,8 +681,7 @@ fn update_firmware() {
                     }
                     
                     // Go back to main menu
-                    queue_string("\033[2J");
-                    queue_string("\033[0;0H");
+                    queue_string("\x1B[2J\x1B[H");
                     let message: &str = "\r\nPress 'U' to enter updater\r\n\
                                         Press 'F' to update firmware\r\n\
                                         Press 'Enter' to boot application\r\n\
@@ -766,8 +764,7 @@ fn update_firmware() {
     }
     
     // Return to main menu
-    queue_string("\033[2J");
-    queue_string("\033[0;0H");
+    queue_string("\x1B[2J\x1B[H");
     let message: &str = "\r\nPress 'U' to enter updater\r\n\
                          Press 'F' to update firmware\r\n\
                          Press 'Enter' to boot application\r\n\
@@ -777,7 +774,7 @@ fn update_firmware() {
 
 // Function to clear the screen
 fn clear_screen() {
-    queue_string("\033[2J");
+    queue_string("\x1B[2J");
 }
 
 // Function to set cursor position
