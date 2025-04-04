@@ -646,7 +646,6 @@ fn process_input() {
     }
 }
 
-// Function to handle firmware updates
 fn update_firmware() {
     // Clear screen and set cursor position
     queue_string("\x1B[2J\x1B[H");
@@ -710,7 +709,10 @@ fn update_firmware() {
         ensure_transmitting();
     }
     
-    // Rest of the function remains the same...
+    // Make sure all pending transmissions are complete
+    while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+        ensure_transmitting();
+    }
     
     // Set up flash parameters based on selection
     let (target_address, expected_magic, slot_size) = match selected_image {
@@ -719,7 +721,27 @@ fn update_firmware() {
         _ => return, // Should never happen
     };
     
-    // Function to transmit data
+    // Clear buffers before starting
+    RX_BUFFER.get(|buf| buf.clear());
+    TX_BUFFER.get(|buf| buf.clear());
+    
+    // Wait a moment before starting XMODEM
+    let start_ms = systick::get_tick_ms();
+    while !systick::wait_ms(start_ms, 1000) {
+        ensure_transmitting();
+    }
+    
+    // Erase the target flash area before beginning transfer
+    let p = unsafe { stm32f4::Peripherals::steal() };
+    
+    if selected_image == 1 {
+        flash::erase_sector(&p, UPDATER_ADDR);
+    } else {
+        flash::erase_sector(&p, SLOT_2_VER_ADDR);
+        flash::erase_sector(&p, SLOT_2_VER_ADDR + 0x20000); // Next sector
+    }
+    
+    // Function to ensure transmission is ongoing
     let transmit_fn = |tx_buf: &mut RingBuffer| {
         ensure_transmitting();
     };
@@ -749,16 +771,16 @@ fn update_firmware() {
             }
         },
         Err(err) => {
-            let error_msg: &str = match err {
-                XmodemError::Crc => "\r\nCRC error in transfer!\r\n",
-                XmodemError::PacketNumber => "\r\nPacket number error in transfer!\r\n",
-                XmodemError::Canceled => "\r\nTransfer was canceled!\r\n",
-                XmodemError::InvalidMagic => "\r\nInvalid magic number in firmware!\r\n",
-                XmodemError::OlderVersion => "\r\nNew firmware is not newer than current version!\r\n",
-                XmodemError::Timeout => "\r\nTimeout during transfer!\r\n",
-                XmodemError::FlashError => "\r\nError writing to flash memory!\r\n",
-                XmodemError::InvalidPacket => "\r\nInvalid packet received!\r\n",
-                XmodemError::EOT => "\r\nUnexpected end of transmission!\r\n",
+            let error_msg = match err {
+                xmodem::XmodemError::Crc => "\r\nCRC error in transfer!\r\n",
+                xmodem::XmodemError::PacketNumber => "\r\nPacket number error in transfer!\r\n",
+                xmodem::XmodemError::Canceled => "\r\nTransfer was canceled!\r\n",
+                xmodem::XmodemError::InvalidMagic => "\r\nInvalid magic number in firmware!\r\n",
+                xmodem::XmodemError::OlderVersion => "\r\nNew firmware is not newer than current version!\r\n",
+                xmodem::XmodemError::Timeout => "\r\nTimeout during transfer!\r\n",
+                xmodem::XmodemError::FlashError => "\r\nError writing to flash memory!\r\n",
+                xmodem::XmodemError::InvalidPacket => "\r\nInvalid packet received!\r\n",
+                xmodem::XmodemError::EOT => "\r\nUnexpected end of transmission!\r\n",
             };
             
             queue_string(error_msg);

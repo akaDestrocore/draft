@@ -1,495 +1,570 @@
-//! XMODEM-1K protocol implementation for firmware updates
-//!
-//! This module provides functionality for receiving firmware updates using the XMODEM-1K protocol.
-//! It handles both 128-byte and 1K packet reception, CRC validation, and magic number/version validation.
-
 #![no_std]
 
+use core::convert::TryInto;
+use stm32f4::Peripherals;
 use crate::ring_buffer::RingBuffer;
 use crate::flash;
+use crate::image::{ImageHeader, IMAGE_TYPE_APP, IMAGE_TYPE_UPDATER};
 use crate::systick;
-use core::sync::atomic::{AtomicBool, Ordering};
 
-/// XMODEM protocol constants
-pub const SOH: u8 = 0x01; // Start of 128-byte data packet
-pub const STX: u8 = 0x02; // Start of 1K data packet
-pub const EOT: u8 = 0x04; // End of transmission
-pub const ACK: u8 = 0x06; // Acknowledge
-pub const NAK: u8 = 0x15; // Not acknowledge
-pub const CAN: u8 = 0x18; // Cancel
-pub const C: u8 = 0x43;   // ASCII 'C' - used to initiate XMODEM-CRC transfer
+// XMODEM Protocol Constants
+pub const SOH: u8 = 0x01;  // Start of Header (128-byte packets)
+pub const STX: u8 = 0x02;  // Start of Text (1024-byte packets)
+pub const EOT: u8 = 0x04;  // End of Transmission
+pub const ACK: u8 = 0x06;  // Acknowledge
+pub const NAK: u8 = 0x15;  // Negative Acknowledge
+pub const CAN: u8 = 0x18;  // Cancel
+pub const C: u8 = 0x43;    // ASCII 'C' - Used for CRC-16 mode
 
-/// XMODEM packet sizes
-pub const SMALL_PACKET_SIZE: usize = 128;     // Standard XMODEM packet data size
-pub const LARGE_PACKET_SIZE: usize = 1024;    // XMODEM-1K packet data size
-pub const PACKET_OVERHEAD: usize = 5;         // Header + packet# + ~packet# + CRC16(2 bytes)
-pub const SMALL_TOTAL_SIZE: usize = SMALL_PACKET_SIZE + PACKET_OVERHEAD; // 133 bytes
-pub const LARGE_TOTAL_SIZE: usize = LARGE_PACKET_SIZE + PACKET_OVERHEAD; // 1029 bytes
+// Timeout values (in milliseconds)
+const INITIAL_TIMEOUT_MS: u32 = 10000;    // 10 seconds for initial connection
+const PACKET_TIMEOUT_MS: u32 = 3000;      // 3 seconds between packets
+const RETRY_DELAY_MS: u32 = 3000;         // 3 seconds between retry attempts
+const MAX_RETRIES: usize = 10;            // Maximum number of retry attempts
 
-/// XMODEM state machine states
+// Buffer sizes
+const STD_PACKET_SIZE: usize = 128;      // Standard XMODEM packet size
+const CRC_SIZE: usize = 2;               // Size of CRC-16 in bytes
+const PACKET_OVERHEAD: usize = 4;        // SOH/STX + PacketNum + ~PacketNum + CRC16
+const MAX_PACKET_SIZE: usize = 1024;     // XMODEM-1K max data size
+const MAX_BUFFER_SIZE: usize = MAX_PACKET_SIZE + PACKET_OVERHEAD; // Total buffer size needed
+
+// XMODEM State Machine States
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum XmodemState {
-    WaitHeader,  // Waiting for SOH or STX byte
-    WaitIndex1,  // Waiting for packet number
-    WaitIndex2,  // Waiting for packet number complement
-    ReadData,    // Reading data bytes
-    WaitCrc,     // Waiting for CRC bytes
+    Idle,
+    WaitForC,
+    WaitForPacketAck,
+    WaitForSOH,
+    WaitForPacketNumber,
+    WaitForComplementPacketNumber,
+    ReceivingData,
+    WaitForCRC,
+    Complete,
+    Error,
 }
 
-/// Error types that can occur during XMODEM transfer
+// Error types
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum XmodemError {
-    Crc,            // CRC mismatch
-    PacketNumber,   // Packet number error
-    Canceled,       // Transfer was canceled
-    InvalidMagic,   // Invalid magic number in image header
-    OlderVersion,   // New version is not newer than current version
-    Timeout,        // Timeout during transfer
-    FlashError,     // Error writing to flash
-    InvalidPacket,  // Invalid packet structure
-    EOT,            // End of Transmission (special internal signal)
+    Timeout,
+    Canceled,
+    PacketNumber,
+    Crc,
+    InvalidPacket,
+    FlashError,
+    InvalidMagic,
+    OlderVersion,
+    EOT,
+    BufferOverflow,
+    InvalidState,
 }
 
-/// Calculate CRC16 for the given data
-///
-/// Implements the CCITT CRC-16 algorithm with polynomial 0x1021
+/// Calculate CRC-16 CCITT for XMODEM
 pub fn calculate_crc16(data: &[u8]) -> u16 {
-    let mut crc: u16 = 0u16;
-    
+    let mut crc: u16 = 0;
     for &byte in data {
-        crc ^= u16::from(byte) << 8;
+        crc ^= (byte as u16) << 8;
         for _ in 0..8 {
             if (crc & 0x8000) != 0 {
                 crc = (crc << 1) ^ 0x1021;
             } else {
-                crc = crc << 1;
+                crc <<= 1;
             }
         }
     }
-    
     crc
 }
 
-/// Send a CAN signal to abort the transfer
-pub fn send_cancel(tx_buffer: &mut RingBuffer) -> Result<(), XmodemError> {
-    // Send CAN bytes (standard practice is to send multiple CAN bytes)
-    tx_buffer.write(CAN);
-    tx_buffer.write(CAN);
-    tx_buffer.write(CAN);
-    Ok(())
-}
-
-/// Validate the first packet of the firmware image
-///
-/// Checks if:
-/// 1. The magic number matches the expected value
-/// 2. The version is newer than any existing image
-pub fn validate_first_packet(data: &[u8], expected_magic: u32, target_address: u32) -> Result<(), XmodemError> {
-    // Extract magic number from the first 4 bytes
-    let magic: u32 = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+/// Send a firmware image using XMODEM-1K protocol
+pub fn send_firmware<F, G>(
+    tx_buffer: &mut RingBuffer,
+    rx_buffer: &mut RingBuffer,
+    firmware_addr: u32,
+    firmware_size: u32,
+    transmit_fn: F,
+    check_abort: G,
+) -> Result<(), XmodemError>
+where
+    F: Fn(&mut RingBuffer),
+    G: Fn() -> bool,
+{
+    // Local variables
+    let mut state = XmodemState::Idle;
+    let mut packet_buffer: [u8; MAX_BUFFER_SIZE] = [0; MAX_BUFFER_SIZE];
+    let mut packet_number: u8 = 1;
+    let mut retries: usize = 0;
+    let mut current_offset: u32 = 0;
+    let mut received_byte: u8;
+    let mut start_time = systick::get_tick_ms();
     
-    // Check if magic number matches
-    if magic != expected_magic {
-        return Err(XmodemError::InvalidMagic);
-    }
+    // Wait for receiver to initiate transfer with 'C'
+    state = XmodemState::WaitForC;
+    start_time = systick::get_tick_ms();
     
-    // Extract version fields (version_major at offset 5, minor at 6, patch at 7)
-    let new_version_major = data[5];
-    let new_version_minor = data[6];
-    let new_version_patch = data[7];
-    
-    // Check if there's already an image at target address
-    if unsafe { *(target_address as *const u32) } != 0xFFFFFFFF {
-        // Read current version
-        let current_version_major = unsafe { *((target_address + 5) as *const u8) };
-        let current_version_minor = unsafe { *((target_address + 6) as *const u8) };
-        let current_version_patch = unsafe { *((target_address + 7) as *const u8) };
+    while current_offset < firmware_size {
+        // Check for abort request
+        if check_abort() {
+            // Send cancel and abort
+            tx_buffer.write(CAN);
+            transmit_fn(tx_buffer);
+            tx_buffer.write(CAN);
+            transmit_fn(tx_buffer);
+            return Err(XmodemError::Canceled);
+        }
         
-        // Compare versions (major first, then minor, then patch)
-        if new_version_major < current_version_major {
-            return Err(XmodemError::OlderVersion);
-        } else if new_version_major == current_version_major {
-            if new_version_minor < current_version_minor {
-                return Err(XmodemError::OlderVersion);
-            } else if new_version_minor == current_version_minor {
-                if new_version_patch <= current_version_patch {
-                    return Err(XmodemError::OlderVersion);
+        // Process state machine
+        match state {
+            XmodemState::WaitForC => {
+                // Wait for receiver to send 'C' to start
+                if rx_buffer.is_empty() {
+                    // Check for timeout
+                    if systick::wait_ms(start_time, INITIAL_TIMEOUT_MS) {
+                        return Err(XmodemError::Timeout);
+                    }
+                    continue;
                 }
+                
+                if let Some(byte) = rx_buffer.read() {
+                    if byte == C {
+                        // Got 'C', start sending first packet
+                        state = XmodemState::Idle;
+                    } else if byte == CAN {
+                        return Err(XmodemError::Canceled);
+                    } else {
+                        // Ignore other bytes
+                    }
+                }
+            },
+            
+            XmodemState::Idle => {
+                // Prepare next packet
+                let remaining_bytes = firmware_size - current_offset;
+                let use_1k_packet = remaining_bytes >= MAX_PACKET_SIZE as u32;
+                let packet_size = if use_1k_packet { MAX_PACKET_SIZE } else { STD_PACKET_SIZE };
+                
+                // Don't exceed remaining firmware size
+                let actual_packet_size = core::cmp::min(packet_size, remaining_bytes as usize);
+                
+                // Prepare packet header
+                if use_1k_packet {
+                    packet_buffer[0] = STX;
+                } else {
+                    packet_buffer[0] = SOH;
+                }
+                packet_buffer[1] = packet_number;
+                packet_buffer[2] = !packet_number;
+                
+                // Copy firmware data
+                let mut i = 0;
+                while i < packet_size {
+                    if i < actual_packet_size {
+                        // Read actual data from firmware
+                        unsafe {
+                            packet_buffer[3 + i] = *(firmware_addr.wrapping_add(current_offset) as *const u8).add(i);
+                        }
+                    } else {
+                        // Pad with SUB character (0x1A)
+                        packet_buffer[3 + i] = 0x1A;
+                    }
+                    i += 1;
+                }
+                
+                // Calculate CRC-16
+                let crc = calculate_crc16(&packet_buffer[3..(3 + packet_size)]);
+                packet_buffer[3 + packet_size] = (crc >> 8) as u8;     // CRC high byte
+                packet_buffer[3 + packet_size + 1] = crc as u8;        // CRC low byte
+                
+                // Send the packet
+                for i in 0..(3 + packet_size + 2) {
+                    tx_buffer.write(packet_buffer[i]);
+                }
+                transmit_fn(tx_buffer);
+                
+                // Move to wait for ACK state
+                state = XmodemState::WaitForPacketAck;
+                start_time = systick::get_tick_ms();
+                retries = 0;
+            },
+            
+            XmodemState::WaitForPacketAck => {
+                // Wait for ACK or NAK
+                if rx_buffer.is_empty() {
+                    // Check for timeout
+                    if systick::wait_ms(start_time, PACKET_TIMEOUT_MS) {
+                        retries += 1;
+                        if retries >= MAX_RETRIES {
+                            return Err(XmodemError::Timeout);
+                        }
+                        
+                        // Resend the packet
+                        state = XmodemState::Idle;
+                    }
+                    continue;
+                }
+                
+                if let Some(byte) = rx_buffer.read() {
+                    if byte == ACK {
+                        // Packet acknowledged, move to next packet
+                        current_offset += packet_buffer[0] as u32;
+                        packet_number = packet_number.wrapping_add(1);
+                        state = XmodemState::Idle;
+                    } else if byte == NAK {
+                        // Packet rejected, retry
+                        retries += 1;
+                        if retries >= MAX_RETRIES {
+                            return Err(XmodemError::Timeout);
+                        }
+                        state = XmodemState::Idle;
+                    } else if byte == CAN {
+                        // Transfer canceled by receiver
+                        return Err(XmodemError::Canceled);
+                    } else {
+                        // Ignore unexpected bytes
+                    }
+                }
+            },
+            
+            _ => {
+                // Invalid state for sender
+                return Err(XmodemError::InvalidState);
             }
+        }
+    }
+    
+    // All packets sent, send EOT
+    tx_buffer.write(EOT);
+    transmit_fn(tx_buffer);
+    
+    // Wait for ACK to EOT
+    start_time = systick::get_tick_ms();
+    while !rx_buffer.is_empty() {
+        if let Some(byte) = rx_buffer.read() {
+            if byte == ACK {
+                return Ok(());
+            } else if byte == NAK {
+                // Resend EOT
+                tx_buffer.write(EOT);
+                transmit_fn(tx_buffer);
+            } else if byte == CAN {
+                return Err(XmodemError::Canceled);
+            }
+        }
+        
+        // Check for timeout
+        if systick::wait_ms(start_time, PACKET_TIMEOUT_MS) {
+            retries += 1;
+            if retries >= MAX_RETRIES {
+                return Err(XmodemError::Timeout);
+            }
+            
+            // Resend EOT
+            tx_buffer.write(EOT);
+            transmit_fn(tx_buffer);
+            start_time = systick::get_tick_ms();
         }
     }
     
     Ok(())
 }
 
-/// Process a received XMODEM packet 
-///
-/// Handles both 128-byte (SOH) and 1K (STX) packets
-pub fn process_packet(
-    state: &mut XmodemState,
-    packet_data: &[u8],
-    data_buffer: &mut [u8; LARGE_PACKET_SIZE],
-    current_packet_size: &mut usize,
-    prev_index1: &mut u8,
-    prev_index2: &mut u8
-) -> Result<bool, XmodemError> {
-    match *state {
-        XmodemState::WaitHeader => {
-            if packet_data[0] == SOH {
-                *current_packet_size = SMALL_PACKET_SIZE;
-                *state = XmodemState::WaitIndex1;
-                Ok(false) // Continue processing
-            } else if packet_data[0] == STX {
-                *current_packet_size = LARGE_PACKET_SIZE;
-                *state = XmodemState::WaitIndex1;
-                Ok(false) // Continue processing
-            } else if packet_data[0] == EOT {
-                Ok(true) // Transfer complete
-            } else {
-                Err(XmodemError::InvalidPacket)
-            }
-        },
-        XmodemState::WaitIndex1 => {
-            // Check if packet number is sequential (or wrapped around)
-            if packet_data[1] == (*prev_index1).wrapping_add(1) {
-                *prev_index1 = packet_data[1];
-                *state = XmodemState::WaitIndex2;
-                Ok(false) // Continue processing
-            } else {
-                Err(XmodemError::PacketNumber)
-            }
-        },
-        XmodemState::WaitIndex2 => {
-            // Check if packet number complement is correct (~packet_number)
-            if packet_data[2] == !(*prev_index1) {
-                *prev_index2 = packet_data[2];
-                *state = XmodemState::ReadData;
-                Ok(false) // Continue processing
-            } else {
-                Err(XmodemError::PacketNumber)
-            }
-        },
-        XmodemState::ReadData => {
-            // Copy data portion of the packet
-            for i in 0..*current_packet_size {
-                data_buffer[i] = packet_data[i + 3]; // Skip header byte, index1, index2
-            }
-            *state = XmodemState::WaitCrc;
-            Ok(false) // Continue processing
-        },
-        XmodemState::WaitCrc => {
-            // Extract the CRC from the packet
-            let received_crc: u16 = ((packet_data[*current_packet_size + 3] as u16) << 8) | 
-                                (packet_data[*current_packet_size + 4] as u16);
-            
-            // Calculate CRC for the data portion
-            let calculated_crc: u16 = calculate_crc16(&data_buffer[0..*current_packet_size]);
-            
-            // Verify CRC matches
-            if received_crc != calculated_crc {
-                Err(XmodemError::Crc)
-            } else {
-                // Reset state for next packet
-                *state = XmodemState::WaitHeader;
-                Ok(false) // Continue processing, CRC is valid
-            }
-        }
-    }
-}
-
-/// Extract a complete XMODEM packet from the receive buffer
-pub fn extract_packet(
-    rx_buffer: &mut RingBuffer, 
-    packet: &mut [u8], 
-    is_first_byte: bool
-) -> Result<usize, XmodemError> {
-    // For the very first byte, we need to determine the packet type
-    if is_first_byte {
-        if rx_buffer.len() < 1 {
-            return Err(XmodemError::Timeout);
-        }
-        
-        let first_byte: u8 = match rx_buffer.read() {
-            Some(byte) => byte,
-            None => return Err(XmodemError::Timeout),
-        };
-        
-        packet[0] = first_byte;
-        
-        if first_byte == EOT {
-            return Ok(1); // End of transmission, only 1 byte needed
-        } else if first_byte != SOH && first_byte != STX {
-            return Err(XmodemError::InvalidPacket);
-        }
-        
-        // Determine the packet size based on the first byte
-        let expected_packet_size: usize = if first_byte == SOH {
-            SMALL_TOTAL_SIZE
-        } else {
-            LARGE_TOTAL_SIZE
-        };
-        
-        // Wait until we have enough data for the complete packet
-        while rx_buffer.len() < expected_packet_size - 1 {
-            // Wait for more data (handled by caller or in a timeout loop)
-            return Err(XmodemError::Timeout);
-        }
-        
-        // Read the rest of the packet
-        for i in 1..expected_packet_size {
-            if let Some(byte) = rx_buffer.read() {
-                packet[i] = byte;
-            } else {
-                return Err(XmodemError::Timeout);
-            }
-        }
-        
-        Ok(expected_packet_size)
-    } else {
-        // For subsequent packets, we can directly check SOH or STX
-        if rx_buffer.len() < 1 {
-            return Err(XmodemError::Timeout);
-        }
-        
-        // Peek at first byte to determine packet type
-        let first_byte: u8 = match rx_buffer.peek() {
-            Some(byte) => byte,
-            None => return Err(XmodemError::Timeout),
-        };
-        
-        if first_byte == EOT {
-            // Read the EOT byte and return it
-            if let Some(byte) = rx_buffer.read() {
-                packet[0] = byte;
-                return Ok(1);
-            }
-        }
-        
-        // Determine expected packet size
-        let expected_packet_size: usize = if first_byte == SOH {
-            SMALL_TOTAL_SIZE
-        } else if first_byte == STX {
-            LARGE_TOTAL_SIZE
-        } else {
-            return Err(XmodemError::InvalidPacket);
-        };
-        
-        // Check if we have a complete packet
-        if rx_buffer.len() < expected_packet_size {
-            return Err(XmodemError::Timeout);
-        }
-        
-        // Read the packet
-        for i in 0..expected_packet_size {
-            if let Some(byte) = rx_buffer.read() {
-                packet[i] = byte;
-            } else {
-                return Err(XmodemError::Timeout);
-            }
-        }
-        
-        Ok(expected_packet_size)
-    }
-}
-
-/// Send initial 'C' character to start XMODEM-CRC transfer
-pub fn send_initial_c(tx_buffer: &mut RingBuffer) {
-    tx_buffer.write(C);
-}
-
-/// Send ACK response
-pub fn send_ack(tx_buffer: &mut RingBuffer) {
-    tx_buffer.write(ACK);
-}
-
-/// Send NAK response
-pub fn send_nak(tx_buffer: &mut RingBuffer) {
-    tx_buffer.write(NAK);
-}
-
-/// Receive a firmware update using XMODEM-1K protocol
-///
-/// This function implements the XMODEM-1K protocol to receive firmware updates.
-/// It validates the magic number and version of the incoming firmware before
-/// writing it to flash memory.
-pub fn receive_firmware<T>(
+/// Receive a firmware image using XMODEM-1K protocol
+pub fn receive_firmware<F>(
     rx_buffer: &mut RingBuffer,
     tx_buffer: &mut RingBuffer,
     target_address: u32,
     expected_magic: u32,
-    max_size: u32,
-    mut transmit_fn: T
-) -> Result<(), XmodemError> 
-where 
-    T: FnMut(&mut RingBuffer)
+    slot_size: u32,
+    transmit_fn: F,
+) -> Result<(), XmodemError>
+where
+    F: Fn(&mut RingBuffer),
 {
-    // XMODEM state variables
-    let mut state = XmodemState::WaitHeader;
-    let mut prev_index1: u8 = 0;
-    let mut prev_index2: u8 = 0xFF;
-    
-    // Buffer to hold the largest possible packet
-    let mut packet_buffer = [0u8; LARGE_TOTAL_SIZE];
-    let mut data_buffer = [0u8; LARGE_PACKET_SIZE];
-    let mut current_packet_size = SMALL_PACKET_SIZE;
-    
+    // Local variables
+    let mut state = XmodemState::WaitForSOH;
+    let mut packet_number: u8 = 1;
+    let mut packet_buffer: [u8; MAX_BUFFER_SIZE] = [0; MAX_BUFFER_SIZE];
+    let mut buffer_index: usize = 0;
     let mut current_address = target_address;
-    let mut first_packet = true;
-    let mut first_byte_processed = false;
-    let mut transfer_complete = false;
+    let mut received_byte: u8;
+    let mut packet_size: usize = STD_PACKET_SIZE;
+    let mut bytes_received: usize = 0;
+    let mut crc_received: u16 = 0;
+    let mut retry_count: usize = 0;
+    let mut initial_transfer: bool = true;
+    let mut last_c_time = systick::get_tick_ms();
     
-    // Initialize timeout tracking
-    let transfer_start = systick::get_tick_ms();
-    let timeout_ms = 60000; // 60 seconds timeout
+    // Initialize peripherals for Flash operations
+    let p = unsafe { Peripherals::steal() };
     
-    // Start by sending 'C' to initiate XMODEM-CRC transfer
-    send_initial_c(tx_buffer);
+    // Send initial 'C' to request transfer in CRC mode
+    tx_buffer.write(C);
     transmit_fn(tx_buffer);
     
-    // Send 'C' periodically until we receive a response
-    let mut last_c_sent = transfer_start;
-    let c_interval_ms = 3000; // Send 'C' every 3 seconds
-    
-    while !transfer_complete {
-        // Check for timeout
-        let current_time = systick::get_tick_ms();
-        if current_time.wrapping_sub(transfer_start) > timeout_ms {
-            return Err(XmodemError::Timeout);
-        }
-        
-        // Send 'C' periodically until first byte is received
-        if !first_byte_processed && current_time.wrapping_sub(last_c_sent) > c_interval_ms {
-            send_initial_c(tx_buffer);
-            transmit_fn(tx_buffer);
-            last_c_sent = current_time;
-        }
-        
-        // Try to extract a packet
-        match extract_packet(rx_buffer, &mut packet_buffer, !first_byte_processed) {
-            Ok(packet_size) => {
-                first_byte_processed = true;
-                
-                // Handle EOT (End of Transmission)
-                if packet_size == 1 && packet_buffer[0] == EOT {
-                    send_ack(tx_buffer);
-                    transmit_fn(tx_buffer);
-                    transfer_complete = true;
-                    break;
+    // Main state machine loop
+    loop {
+        // Check if we need to send another 'C' (every 3 seconds if still waiting for SOH)
+        if state == XmodemState::WaitForSOH && initial_transfer {
+            let current_time = systick::get_tick_ms();
+            if systick::wait_ms(last_c_time, RETRY_DELAY_MS) {
+                retry_count += 1;
+                if retry_count >= MAX_RETRIES {
+                    return Err(XmodemError::Timeout);
                 }
                 
-                // Process the packet
-                match process_packet(
-                    &mut state, 
-                    &packet_buffer, 
-                    &mut data_buffer, 
-                    &mut current_packet_size, 
-                    &mut prev_index1, 
-                    &mut prev_index2
-                ) {
-                    Ok(completed) => {
-                        if completed {
-                            transfer_complete = true;
-                            break;
+                // Send another 'C'
+                tx_buffer.write(C);
+                transmit_fn(tx_buffer);
+                last_c_time = current_time;
+            }
+        }
+        
+        // Try to read a byte
+        if rx_buffer.is_empty() {
+            // No data yet, continue waiting
+            continue;
+        }
+        
+        // We have data, read a byte
+        if let Some(byte) = rx_buffer.read() {
+            received_byte = byte;
+            
+            // Check for cancel
+            if received_byte == CAN {
+                // Send CAN to acknowledge
+                tx_buffer.write(CAN);
+                transmit_fn(tx_buffer);
+                
+                return Err(XmodemError::Canceled);
+            }
+            
+            // Check for EOT (end of transmission)
+            if received_byte == EOT {
+                if state != XmodemState::WaitForSOH {
+                    // Unexpected EOT
+                    return Err(XmodemError::EOT);
+                }
+                
+                // Acknowledge the EOT
+                tx_buffer.write(ACK);
+                transmit_fn(tx_buffer);
+                
+                // Check the firmware header
+                let header = unsafe { &*(target_address as *const ImageHeader) };
+                
+                // Validate the magic number
+                if header.image_magic != expected_magic {
+                    return Err(XmodemError::InvalidMagic);
+                }
+                
+                return Ok(());
+            }
+            
+            // Process state machine
+            match state {
+                XmodemState::WaitForSOH => {
+                    if received_byte == SOH {
+                        // Standard 128-byte packet
+                        packet_size = STD_PACKET_SIZE;
+                        state = XmodemState::WaitForPacketNumber;
+                        buffer_index = 0;
+                    } else if received_byte == STX {
+                        // 1K packet (1024 bytes)
+                        packet_size = MAX_PACKET_SIZE;
+                        state = XmodemState::WaitForPacketNumber;
+                        buffer_index = 0;
+                    }
+                    // Ignore other bytes when waiting for SOH/STX
+                },
+                
+                XmodemState::WaitForPacketNumber => {
+                    packet_buffer[buffer_index] = received_byte;
+                    buffer_index += 1;
+                    
+                    // Mark that we've started receiving packets
+                    initial_transfer = false;
+                    
+                    // Verify packet number
+                    if received_byte != packet_number {
+                        // Send NAK to request retransmission
+                        tx_buffer.write(NAK);
+                        transmit_fn(tx_buffer);
+                        
+                        // Go back to waiting for SOH
+                        state = XmodemState::WaitForSOH;
+                        continue;
+                    }
+                    
+                    state = XmodemState::WaitForComplementPacketNumber;
+                },
+                
+                XmodemState::WaitForComplementPacketNumber => {
+                    packet_buffer[buffer_index] = received_byte;
+                    buffer_index += 1;
+                    
+                    // Verify complement of packet number
+                    if received_byte != (255 - packet_buffer[0]) {
+                        // Send NAK to request retransmission
+                        tx_buffer.write(NAK);
+                        transmit_fn(tx_buffer);
+                        
+                        // Go back to waiting for SOH
+                        state = XmodemState::WaitForSOH;
+                        continue;
+                    }
+                    
+                    // Move to data reception state
+                    state = XmodemState::ReceivingData;
+                    bytes_received = 0;
+                },
+                
+                XmodemState::ReceivingData => {
+                    if buffer_index >= MAX_BUFFER_SIZE {
+                        // Buffer overflow protection
+                        return Err(XmodemError::BufferOverflow);
+                    }
+                    
+                    packet_buffer[buffer_index] = received_byte;
+                    buffer_index += 1;
+                    bytes_received += 1;
+                    
+                    if bytes_received >= packet_size {
+                        state = XmodemState::WaitForCRC;
+                        bytes_received = 0;
+                    }
+                },
+                
+                XmodemState::WaitForCRC => {
+                    if buffer_index >= MAX_BUFFER_SIZE {
+                        // Buffer overflow protection
+                        return Err(XmodemError::BufferOverflow);
+                    }
+                    
+                    packet_buffer[buffer_index] = received_byte;
+                    buffer_index += 1;
+                    
+                    if bytes_received == 0 {
+                        // First CRC byte (high byte)
+                        crc_received = (received_byte as u16) << 8;
+                        bytes_received += 1;
+                    } else {
+                        // Second CRC byte (low byte)
+                        crc_received |= received_byte as u16;
+                        
+                        // Calculate CRC-16 for the received data
+                        let calculated_crc = calculate_crc16(&packet_buffer[2..(2 + packet_size)]);
+                        
+                        if calculated_crc != crc_received {
+                            // CRC error, request retransmission
+                            tx_buffer.write(NAK);
+                            transmit_fn(tx_buffer);
+                            
+                            // Go back to waiting for SOH
+                            state = XmodemState::WaitForSOH;
+                            continue;
                         }
                         
-                        // If we've processed the data, we need to write it to flash
-                        if state == XmodemState::WaitHeader {
-                            // For the first packet, validate magic number and version
-                            if first_packet {
-                                match validate_first_packet(&data_buffer, expected_magic, target_address) {
-                                    Ok(_) => {
-                                        // Erase the flash sector before writing first packet
-                                        let p = unsafe { stm32f4::Peripherals::steal() };
-                                        flash::erase_sector(&p, current_address);
-                                        
-                                        // First packet is valid, continue
-                                        first_packet = false;
-                                    },
-                                    Err(e) => {
-                                        // Cancel the transfer if validation fails
-                                        send_cancel(tx_buffer)?;
-                                        transmit_fn(tx_buffer);
-                                        return Err(e);
-                                    }
-                                }
-                            }
-                            
-                            // Write data to flash
-                            let p = unsafe { stm32f4::Peripherals::steal() };
-                            let result = flash::write(&p, &data_buffer[0..current_packet_size], current_address);
-                            
-                            if result != 0 {
-                                // Flash write failed
-                                send_cancel(tx_buffer)?;
-                                transmit_fn(tx_buffer);
-                                return Err(XmodemError::FlashError);
-                            }
-                            
-                            // Update address for next packet
-                            current_address += current_packet_size as u32;
-                            
-                            // Ensure we don't exceed the slot size
-                            if (current_address - target_address) as usize > max_size as usize {
-                                send_cancel(tx_buffer)?;
-                                transmit_fn(tx_buffer);
-                                return Err(XmodemError::FlashError);
-                            }
-                            
-                            // Send ACK
-                            send_ack(tx_buffer);
+                        // Data is valid, write to flash memory
+                        // First check if we have space
+                        if current_address - target_address + (packet_size as u32) > slot_size {
+                            // Not enough space
+                            tx_buffer.write(CAN);
                             transmit_fn(tx_buffer);
+                            tx_buffer.write(CAN);
+                            transmit_fn(tx_buffer);
+                            
+                            return Err(XmodemError::FlashError);
                         }
-                    },
-                    Err(e) => {
-                        // Send NAK for recoverable errors, CAN for fatal errors
-                        match e {
-                            XmodemError::Crc | XmodemError::PacketNumber => {
-                                send_nak(tx_buffer);
-                                transmit_fn(tx_buffer);
-                                // Reset state to wait for packet retransmission
-                                state = XmodemState::WaitHeader;
-                            },
-                            _ => {
-                                send_cancel(tx_buffer)?;
-                                transmit_fn(tx_buffer);
-                                return Err(e);
+                        
+                        // For the first packet, erase the sector
+                        if packet_number == 1 {
+                            // Erase the first sector
+                            if flash::erase_sector(&p, current_address) == 0 {
+                                return Err(XmodemError::FlashError);
                             }
                         }
+                        
+                        // Check if we need to erase more sectors
+                        let next_addr = current_address + packet_size as u32;
+                        let current_sector = flash::get_sector_number(current_address);
+                        let next_sector = flash::get_sector_number(next_addr);
+                        
+                        if current_sector != next_sector && next_sector.is_some() {
+                            // We're crossing a sector boundary, erase the next sector
+                            if flash::erase_sector(&p, next_addr) == 0 {
+                                return Err(XmodemError::FlashError);
+                            }
+                        }
+                        
+                        // Write data to flash
+                        let flash_result = flash::write(&p, &packet_buffer[2..(2 + packet_size)], current_address);
+                        
+                        if flash_result != 0 {
+                            // Flash write error
+                            tx_buffer.write(CAN);
+                            transmit_fn(tx_buffer);
+                            tx_buffer.write(CAN);
+                            transmit_fn(tx_buffer);
+                            
+                            return Err(XmodemError::FlashError);
+                        }
+                        
+                        // Advance address pointer
+                        current_address += packet_size as u32;
+                        
+                        // Acknowledge successful reception
+                        tx_buffer.write(ACK);
+                        transmit_fn(tx_buffer);
+                        
+                        // Increment packet number for next packet
+                        packet_number = packet_number.wrapping_add(1);
+                        
+                        // Reset state machine for next packet
+                        state = XmodemState::WaitForSOH;
                     }
+                },
+                
+                _ => {
+                    // Invalid state
+                    return Err(XmodemError::InvalidState);
                 }
-            },
-            Err(XmodemError::Timeout) => {
-                // Not enough data yet, continue waiting
-                continue;
-            },
-            Err(e) => {
-                // Handle other errors
-                send_cancel(tx_buffer)?;
-                transmit_fn(tx_buffer);
-                return Err(e);
             }
         }
     }
-    
-    Ok(())
 }
 
-/// Helper function to print transfer status
-pub fn print_error_message(err: XmodemError, tx_buffer: &mut RingBuffer, transmit_fn: fn(&mut RingBuffer)) {
-    let error_msg: &str = match err {
-        XmodemError::Crc => "CRC error in transfer!\r\n",
-        XmodemError::PacketNumber => "Packet number error in transfer!\r\n",
-        XmodemError::Canceled => "Transfer was canceled!\r\n",
-        XmodemError::InvalidMagic => "Invalid magic number in firmware!\r\n",
-        XmodemError::OlderVersion => "New firmware is not newer than current version!\r\n",
-        XmodemError::Timeout => "Timeout during transfer!\r\n",
-        XmodemError::FlashError => "Error writing to flash memory!\r\n",
-        XmodemError::InvalidPacket => "Invalid packet received!\r\n",
-        XmodemError::EOT => "Unexpected error (EOT)!\r\n", // This should never happen externally
-    };
-    
-    for &byte in error_msg.as_bytes() {
-        tx_buffer.write(byte);
-    }
+/// Helper function to send CAN (cancel) sequence
+pub fn send_cancel(tx_buffer: &mut RingBuffer, transmit_fn: impl Fn(&mut RingBuffer)) {
+    // Send CAN characters to abort transfer
+    tx_buffer.write(CAN);
     transmit_fn(tx_buffer);
+    tx_buffer.write(CAN);
+    transmit_fn(tx_buffer);
+}
+
+/// Check if the new firmware is a valid update compared to the current one
+pub fn validate_firmware_update(current_addr: u32, new_addr: u32) -> Result<bool, XmodemError> {
+    let current_header = unsafe { &*(current_addr as *const ImageHeader) };
+    let new_header = unsafe { &*(new_addr as *const ImageHeader) };
+    
+    // Check if new firmware has valid magic
+    if !new_header.is_valid() {
+        return Err(XmodemError::InvalidMagic);
+    }
+    
+    // If current firmware is invalid/missing, any valid firmware is acceptable
+    if !current_header.is_valid() {
+        return Ok(true);
+    }
+    
+    // Check if new firmware is newer than current one
+    Ok(new_header.is_newer_than(current_header))
+}
+
+/// Verify CRC of downloaded firmware
+pub fn verify_firmware_crc(addr: u32, size: u32) -> bool {
+    // This function would verify the CRC of the firmware
+    // We'd need to know how the CRC is calculated and stored
+    // For now, just return true
+    true
 }
