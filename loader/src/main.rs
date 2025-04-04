@@ -610,6 +610,10 @@ fn process_input() {
             b'F' | b'f' => {
                 queue_string("\r\nEntering firmware update mode...\r\n");
                 
+                // Reset timeout when entering firmware update mode
+                let current_ms = systick::get_tick_ms();
+                START_TIME.get(|time: &mut u32| *time = current_ms + BOOT_TIMEOUT_MS * 1000);
+                
                 // Wait for transmission to complete
                 while TX_IN_PROGRESS.load(Ordering::SeqCst) {
                     ensure_transmitting();
@@ -618,7 +622,6 @@ fn process_input() {
                 update_firmware();
             },
             b'\r' | b'\n' => {
-
                 let is_app_valid: bool = unsafe { *(SLOT_2_VER_ADDR as *const u32) != 0xFFFFFFFF };
                 
                 if !is_app_valid {
@@ -632,9 +635,12 @@ fn process_input() {
                     }
                 }
             },
-
             _ => {
                 queue_string("\r\nPress 'U' for updater, 'F' for firmware update, 'Enter' for application\r\n");
+                
+                // Reset timeout on any other key press as well
+                let current_ms = systick::get_tick_ms();
+                START_TIME.get(|time: &mut u32| *time = current_ms);
             },
         }
     }
@@ -687,6 +693,11 @@ fn update_firmware() {
                                         Press 'Enter' to boot application\r\n\
                                         Will boot automatically in 10 seconds...\r\n";
                     queue_string(message);
+                    
+                    // Reset the timeout when returning to main menu
+                    let current_ms = systick::get_tick_ms();
+                    START_TIME.get(|time: &mut u32| *time = current_ms);
+                    
                     return;
                 },
                 _ => {
@@ -698,6 +709,8 @@ fn update_firmware() {
         
         ensure_transmitting();
     }
+    
+    // Rest of the function remains the same...
     
     // Set up flash parameters based on selection
     let (target_address, expected_magic, slot_size) = match selected_image {
@@ -770,6 +783,10 @@ fn update_firmware() {
                          Press 'Enter' to boot application\r\n\
                          Will boot automatically in 10 seconds...\r\n";
     queue_string(message);
+    
+    // Reset the timeout when returning to main menu
+    let current_ms = systick::get_tick_ms();
+    START_TIME.get(|time: &mut u32| *time = current_ms);
 }
 
 // Function to clear the screen
