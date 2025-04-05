@@ -38,11 +38,7 @@ pub fn unlock(p: &pac::Peripherals) -> bool {
         p.flash.keyr().write(|w| w.key().set(0xCDEF89AB));
     }
 
-    let start_ms: u32 = systick::get_tick_ms();
-    while !systick::wait_ms(start_ms, 1) {
-        cortex_m::asm::nop();
-    }
-
+    // No delay needed here - just check immediately
     // Verify unlock was successful
     p.flash.cr().read().lock().is_unlocked()
 }
@@ -51,10 +47,7 @@ pub fn unlock(p: &pac::Peripherals) -> bool {
 pub fn lock(p: &pac::Peripherals) {
     p.flash.cr().modify(|_, w| w.lock().locked());
     
-    let start_ms: u32 = systick::get_tick_ms();
-    while !systick::wait_ms(start_ms, 1) {
-        cortex_m::asm::nop();
-    }
+    // No delay needed here
 }
 
 // Wait for the last flash operation to complete
@@ -70,7 +63,7 @@ pub fn wait_for_last_operation(p: &pac::Peripherals) -> bool {
 
     // Wait for busy flag to clear with timeout
     let start_ms: u32 = systick::get_tick_ms();
-    let timeout_ms: u32 = 1000;
+    let timeout_ms: u32 = 100; // Reduced from 1000ms to 100ms
     
     while p.flash.sr().read().bsy().is_busy() {
         if systick::wait_ms(start_ms, timeout_ms) {
@@ -80,10 +73,7 @@ pub fn wait_for_last_operation(p: &pac::Peripherals) -> bool {
         cortex_m::asm::wfi();
     }
 
-    let start_ms: u32 = systick::get_tick_ms();
-    while !systick::wait_ms(start_ms, 5) {
-        cortex_m::asm::nop();
-    }
+    // No delay needed here
 
     let sr = p.flash.sr().read();
     
@@ -146,10 +136,7 @@ pub fn erase_sector(p: &pac::Peripherals, destination: u32) -> u32 {
         return 0;
     }
 
-    let start_ms: u32 = systick::get_tick_ms();
-    while !systick::wait_ms(start_ms, 5) {
-        cortex_m::asm::nop();
-    }
+    // No delay needed here
 
     // Configure sector erase with correct PSIZE
     unsafe {
@@ -160,10 +147,7 @@ pub fn erase_sector(p: &pac::Peripherals, destination: u32) -> u32 {
             .snb().bits(0)
         );
         
-        let start_ms: u32 = systick::get_tick_ms();
-        while !systick::wait_ms(start_ms, 1) {
-            cortex_m::asm::nop();
-        }
+        // No delay needed here
         
         // Set all the parameters properly
         p.flash.cr().modify(|_, w| w
@@ -172,19 +156,13 @@ pub fn erase_sector(p: &pac::Peripherals, destination: u32) -> u32 {
             .snb().bits(sector)
         );
 
-        let start_ms: u32 = systick::get_tick_ms();
-        while !systick::wait_ms(start_ms, 1) {
-            cortex_m::asm::nop();
-        }
+        // No delay needed here
 
         // Start the erase operation
         p.flash.cr().modify(|_, w| w.strt().start());
     }
 
-    let start_ms: u32 = systick::get_tick_ms();
-    while !systick::wait_ms(start_ms, 10) {
-        cortex_m::asm::nop();
-    }
+    // No delay needed here - the busy wait below will handle it
 
     // Wait for operation to complete with longer timeout
     if !wait_for_last_operation(p) {
@@ -197,10 +175,7 @@ pub fn erase_sector(p: &pac::Peripherals, destination: u32) -> u32 {
     // Clear SER bit
     p.flash.cr().modify(|_, w| w.ser().clear_bit());
     
-    let start_ms: u32 = systick::get_tick_ms();
-    while !systick::wait_ms(start_ms, 5) {
-        cortex_m::asm::nop();
-    }
+    // No delay needed here
     
     // Lock flash
     lock(p);
@@ -227,10 +202,7 @@ pub fn erase(p: &pac::Peripherals, destination: u32) -> bool {
         return false;
     }
 
-    let start_ms: u32 = systick::get_tick_ms();
-    while !systick::wait_ms(start_ms, 5) {
-        cortex_m::asm::nop();
-    }
+    // No delay needed here
 
     for sector in start_sector..FLASH_SECTOR_TOTAL {
         // Configure sector erase
@@ -242,10 +214,7 @@ pub fn erase(p: &pac::Peripherals, destination: u32) -> bool {
                 .snb().bits(0)
             );
             
-            let start_ms: u32 = systick::get_tick_ms();
-            while !systick::wait_ms(start_ms, 1) {
-                cortex_m::asm::nop();
-            }
+            // No delay needed here
             
             // Set proper values
             p.flash.cr().modify(|_, w| w
@@ -254,19 +223,13 @@ pub fn erase(p: &pac::Peripherals, destination: u32) -> bool {
                 .snb().bits(sector)
             );
 
-            let start_ms: u32 = systick::get_tick_ms();
-            while !systick::wait_ms(start_ms, 1) {
-                cortex_m::asm::nop();
-            }
+            // No delay needed here
 
             // Start the erase operation
             p.flash.cr().modify(|_, w| w.strt().start());
         }
 
-        let start_ms: u32 = systick::get_tick_ms();
-        while !systick::wait_ms(start_ms, 10) {
-            cortex_m::asm::nop();
-        }
+        // No delay needed here - the busy wait below will handle it
 
         // Wait for operation to complete
         if !wait_for_last_operation(p) {
@@ -279,10 +242,7 @@ pub fn erase(p: &pac::Peripherals, destination: u32) -> bool {
         // Clear SER bit
         p.flash.cr().modify(|_, w| w.ser().clear_bit());
         
-        let start_ms: u32 = systick::get_tick_ms();
-        while !systick::wait_ms(start_ms, 5) {
-            cortex_m::asm::nop();
-        }
+        // No delay needed here
     }
 
     // Lock flash
@@ -312,10 +272,7 @@ pub fn write(p: &pac::Peripherals, source_data: &[u8], destination: u32) -> u8 {
         return 1;
     }
 
-    let start_ms: u32 = systick::get_tick_ms();
-    while !systick::wait_ms(start_ms, 5) {
-        cortex_m::asm::nop();
-    }
+    // No delay needed here
 
     // Reset CR register first
     unsafe {
@@ -324,20 +281,14 @@ pub fn write(p: &pac::Peripherals, source_data: &[u8], destination: u32) -> u8 {
             .psize().bits(0)
         );
         
-        let start_ms: u32 = systick::get_tick_ms();
-        while !systick::wait_ms(start_ms, 1) {
-            cortex_m::asm::nop();
-        }
+        // No delay needed here
     }
 
     p.flash.cr().modify(|_, w| w
         .psize().psize32() // 2 = 32-bit for 2.7V-3.6V
     );
 
-    let start_ms: u32 = systick::get_tick_ms();
-    while !systick::wait_ms(start_ms, 1) {
-        cortex_m::asm::nop();
-    }
+    // No delay needed here
 
     for i in (0..source_data.len()).step_by(block_size as usize) {
         let addr: u32 = destination + i as u32;
@@ -351,19 +302,13 @@ pub fn write(p: &pac::Peripherals, source_data: &[u8], destination: u32) -> u8 {
 
         p.flash.cr().modify(|_, w| w.pg().program());
 
-        let start_ms: u32 = systick::get_tick_ms();
-        while !systick::wait_ms(start_ms, 1) {
-            cortex_m::asm::nop();
-        }
+        // No delay needed here
 
         unsafe { 
             ptr::write_volatile(addr as *mut u32, data);
         }
         
-        let start_ms: u32 = systick::get_tick_ms();
-        while !systick::wait_ms(start_ms, 1) {
-            cortex_m::asm::nop();
-        }
+        // No delay needed here
 
         if !wait_for_last_operation(p) {
             p.flash.cr().modify(|_, w| w.pg().clear_bit());
@@ -374,25 +319,18 @@ pub fn write(p: &pac::Peripherals, source_data: &[u8], destination: u32) -> u8 {
         // Clear PG bit between writes
         p.flash.cr().modify(|_, w| w.pg().clear_bit());
 
-        let start_ms: u32 = systick::get_tick_ms();
-        while !systick::wait_ms(start_ms, 1) {
-            cortex_m::asm::nop();
-        }
+        // No delay needed here
     }
     
     // Lock flash
     lock(p);
     
-    0 // Успех
+    0 // Success
 }
 
 // Read data from flash into the provided buffer
 pub fn read(source: u32, destination: &mut [u8]) {
-
-    let start_ms: u32 = systick::get_tick_ms();
-    while !systick::wait_ms(start_ms, 1) {
-        cortex_m::asm::nop();
-    }
+    // No delay needed here
     
     for (i, byte) in destination.iter_mut().enumerate() {
         unsafe {
@@ -400,8 +338,5 @@ pub fn read(source: u32, destination: &mut [u8]) {
         }
     }
     
-    let start_ms: u32 = systick::get_tick_ms();
-    while !systick::wait_ms(start_ms, 1) {
-        cortex_m::asm::nop();
-    }
+    // No delay needed here
 }
