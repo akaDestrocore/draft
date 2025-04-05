@@ -17,7 +17,6 @@ use misc::{
     image::{ImageHeader, SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER, IMAGE_MAGIC_APP, IMAGE_MAGIC_UPDATER},
     systick,
     flash,
-    xmodem::{self, XmodemError},
 };
 
 #[no_mangle]
@@ -56,9 +55,9 @@ impl<T> Mutex<T> {
     }
 }
 
-const SLOT_2_APP_ADDR: u32 = 0x08020200;
 const UPDATER_ADDR: u32 = 0x08008000;
-const SLOT_2_VER_ADDR: u32 = 0x08020000;
+const APP_ADDR: u32 = 0x08020000;
+const IMAGE_HDR_SIZE: u32 = 0x200;
 const BOOT_TIMEOUT_MS: u32 = 10_000; // 10 sec
 
 // pointer wrappers
@@ -77,16 +76,6 @@ static USART2_PTR: Mutex<Option<PeripheralPtr<pac::usart2::RegisterBlock>>> =
     Mutex::new(None);
 static GPIOD_PTR: Mutex<Option<PeripheralPtr<pac::gpiod::RegisterBlock>>> =
     Mutex::new(None);
-
-// Enum for message types
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum MESSAGE_t {
-    PRINT_BOOT_LOADER,
-    PRINT_OPTIONS,
-    PRINT_UPD_FIRMWARE,
-    PRINT_SEL_FIRMWARE,
-    PRINT_ERROR,
-}
 
 #[entry]
 fn main() -> ! {
@@ -353,51 +342,7 @@ fn queue_string(s: &str) {
     ensure_transmitting();
 }
 
-// New function that ensures transmission is complete
-fn transmit_and_wait(tx_buf: &RingBuffer) {
-    // Initiate transmission
-    ensure_transmitting();
-    
-    // Wait for transmission to complete or for a short fixed time
-    let mut wait_count = 0;
-    while TX_IN_PROGRESS.load(Ordering::SeqCst) {
-        wait_count += 1;
-        if wait_count > 10000 {  // Simple delay counter instead of relying on systick
-            break;  // Break after some time even if TX_IN_PROGRESS is still true
-        }
-        
-        // Continue checking and give CPU some breathing room
-        for _ in 0..100 {
-            asm::nop();
-        }
-    }
-}
-
-fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
-    let is_app_valid: bool = unsafe {
-        *(SLOT_2_VER_ADDR as *const u32) != 0xFFFFFFFF
-    };
-
-    if !is_app_valid {
-        queue_string("\r\nValid application not found!\r\n");
-        
-        while TX_IN_PROGRESS.load(Ordering::SeqCst) {
-            ensure_transmitting();
-        }
-        
-        loop {
-            asm::nop();
-        }
-    }
-
-    let reset_addr: u32 = SLOT_2_APP_ADDR + 4;
-    let stack_addr: u32 = unsafe {
-        *(SLOT_2_APP_ADDR as *const u32)
-    };
-    let reset_vector: u32 = unsafe {
-        *(reset_addr as *const u32)
-    };
-
+fn rcc_deinit(p: &Peripherals) {
     // Reset clock
     p.rcc.cr().modify(|_, w| w.hsion().set_bit());
     while p.rcc.cr().read().hsirdy().bit_is_clear() {
@@ -453,7 +398,9 @@ fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
 
     // reset all CSR flags
     p.rcc.csr().modify(|_, w| w.rmvf().set_bit());
+}
 
+fn deinit(p: &Peripherals) {
     // force reset for all peripherals
     p.rcc.apb1rstr().write(|w| unsafe { w.bits(0xF6FEC9FF) });
     p.rcc.apb1rstr().write(|w| unsafe { w.bits(0x0) });
@@ -469,6 +416,40 @@ fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
 
     p.rcc.ahb3rstr().write(|w| unsafe { w.bits(0x00000001) });
     p.rcc.ahb3rstr().write(|w| unsafe { w.bits(0x0) });
+}
+
+fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
+    let mut is_app_valid: bool = false;
+    let header_ptr: *const ImageHeader = APP_ADDR as *const ImageHeader;
+    unsafe {  
+        // check if magic is correct
+        if (*header_ptr).image_magic == IMAGE_MAGIC_APP {
+            is_app_valid = true;
+        }
+    };
+
+    if !is_app_valid {
+        queue_string("\r\nValid application not found!\r\n");
+        
+        while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+            ensure_transmitting();
+        }
+        
+        loop {
+            asm::nop();
+        }
+    }
+
+    let reset_addr: u32 = APP_ADDR + IMAGE_HDR_SIZE + 4;
+    let stack_addr: u32 = unsafe {
+        *((APP_ADDR + IMAGE_HDR_SIZE) as *const u32)
+    };
+    let reset_vector: u32 = unsafe {
+        *(reset_addr as *const u32)
+    };
+
+    rcc_deinit(p);
+    deinit(p);
 
     // remap
     p.rcc.apb2enr().modify(|_, w| w.syscfgen().set_bit());
@@ -493,9 +474,9 @@ fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
             (1 << 18) | (1 << 17) | (1 << 16)
         ));
 
-        (*scb).vtor.write(SLOT_2_APP_ADDR);
+        (*scb).vtor.write(APP_ADDR + IMAGE_HDR_SIZE);
 
-        // change SP
+        // set MSP
         core::arch::asm!("MSR msp, {0}", in(reg) stack_addr);
 
         let jump_fn: extern "C" fn() -> ! = core::mem::transmute(reset_vector);
@@ -504,79 +485,37 @@ fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
 }
 
 fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
+    let mut is_upd_valid: bool = false;
+    let header_ptr: *const ImageHeader = APP_ADDR as *const ImageHeader;
+    unsafe {  
+        // check if magic is correct
+        if (*header_ptr).image_magic == IMAGE_MAGIC_APP {
+            is_upd_valid = true;
+        }
+    };
 
-    let reset_addr: u32 = UPDATER_ADDR + 4;
+    if !is_upd_valid {
+        queue_string("\r\nValid updater not found!\r\n");
+        
+        while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+            ensure_transmitting();
+        }
+        
+        loop {
+            asm::nop();
+        }
+    }
+
+    let reset_addr: u32 = UPDATER_ADDR + IMAGE_HDR_SIZE + 4;
     let stack_addr: u32 = unsafe {
-        *(UPDATER_ADDR as *const u32)
+        *((UPDATER_ADDR + IMAGE_HDR_SIZE) as *const u32)
     };
     let reset_vector: u32 = unsafe {
         *(reset_addr as *const u32)
     };
 
-    p.rcc.cr().modify(|_, w| w.hsion().set_bit());
-    while p.rcc.cr().read().hsirdy().bit_is_clear() {
-        // wait
-    }
-
-    // set hsitrim to reset value
-    p.rcc.cr().modify(|_, w| unsafe {
-        w.hsitrim().bits(0x10)
-    });
-
-    p.rcc.cfgr().reset();
-    while !p.rcc.cfgr().read().sws().is_hsi() {
-        asm::nop();
-    }
-
-    p.rcc.cr().modify(|_, w| w
-        .hseon().clear_bit()
-        .hsebyp().clear_bit()
-        .csson().clear_bit()
-    );
-    while p.rcc.cr().read().hserdy().bit_is_set() {
-        asm::nop();
-    }
-
-    // reset PLL configuration
-    p.rcc.pllcfgr().modify(|_, w| unsafe {
-        w.pllm().bits(0x10)
-        .plln().bits(0x040)
-        .pllp().bits(0x080)
-        .pllq().bits(0x4)
-    });
-
-    // disable all interrupts
-    p.rcc.cir().modify(|_, w| w
-        .lsirdyie().clear_bit()
-        .lserdyie().clear_bit()
-        .hsirdyie().clear_bit()
-        .pllrdyie().clear_bit()
-    );
-    p.rcc.cir().modify(|_, w| w
-        .lsirdyc().clear_bit()
-        .lserdyc().clear_bit()
-        .hsirdyc().clear_bit()
-        .pllrdyc().clear_bit()
-    );
-
-    // reset all CSR flags
-    p.rcc.csr().modify(|_, w| w.rmvf().set_bit());
-
-    // force reset for all peripherals
-    p.rcc.apb1rstr().write(|w| unsafe { w.bits(0xF6FEC9FF) });
-    p.rcc.apb1rstr().write(|w| unsafe { w.bits(0x0) });
-
-    p.rcc.apb2rstr().write(|w| unsafe { w.bits(0x04777933) });
-    p.rcc.apb2rstr().write(|w| unsafe { w.bits(0x0) });
-
-    p.rcc.ahb1rstr().write(|w| unsafe { w.bits(0x226011FF) });
-    p.rcc.ahb1rstr().write(|w| unsafe { w.bits(0x0) });
-
-    p.rcc.ahb2rstr().write(|w| unsafe { w.bits(0x000000C1) });
-    p.rcc.ahb2rstr().write(|w| unsafe { w.bits(0x0) });
-
-    p.rcc.ahb3rstr().write(|w| unsafe { w.bits(0x00000001) });
-    p.rcc.ahb3rstr().write(|w| unsafe { w.bits(0x0) });
+    rcc_deinit(p);
+    deinit(p);
 
     // remap
     p.rcc.apb2enr().modify(|_, w| w.syscfgen().set_bit());
@@ -591,7 +530,6 @@ fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
     cp.SYST.disable_counter();
     cp.SYST.disable_interrupt();
 
-    // disable all pending interrupts
     unsafe {
         let scb: *const peripheral::scb::RegisterBlock = SCB::ptr();
 
@@ -602,9 +540,9 @@ fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
             (1 << 18) | (1 << 17) | (1 << 16)
         ));
 
-        (*scb).vtor.write(UPDATER_ADDR);
+        (*scb).vtor.write(UPDATER_ADDR + IMAGE_HDR_SIZE);
 
-        // change SP
+        // set MSP
         core::arch::asm!("MSR msp, {0}", in(reg) stack_addr);
 
         let jump_fn: extern "C" fn() -> ! = core::mem::transmute(reset_vector);
@@ -631,7 +569,7 @@ fn process_input() {
                 queue_string("\r\nEntering firmware update mode...\r\n");
                 
                 // Reset timeout when entering firmware update mode
-                let current_ms = systick::get_tick_ms();
+                let current_ms: u32 = systick::get_tick_ms();
                 START_TIME.get(|time: &mut u32| *time = current_ms + BOOT_TIMEOUT_MS * 1000);
                 
                 // Wait for transmission to complete
@@ -642,7 +580,7 @@ fn process_input() {
                 update_firmware();
             },
             b'\r' | b'\n' => {
-                let is_app_valid: bool = unsafe { *(SLOT_2_VER_ADDR as *const u32) != 0xFFFFFFFF };
+                let is_app_valid: bool = unsafe { *(APP_ADDR as *const u32) != 0xFFFFFFFF };
                 
                 if !is_app_valid {
                     queue_string("\r\nValid application not found!\r\n");
@@ -659,7 +597,7 @@ fn process_input() {
                 queue_string("\r\nPress 'U' for updater, 'F' for firmware update, 'Enter' for application\r\n");
                 
                 // Reset timeout on any other key press as well
-                let current_ms = systick::get_tick_ms();
+                let current_ms: u32 = systick::get_tick_ms();
                 START_TIME.get(|time: &mut u32| *time = current_ms);
             },
         }
@@ -679,159 +617,8 @@ fn update_firmware() {
     let mut selected_image = 0u8;
     let mut rx_byte = 0u8;
     
-    // Wait for user selection
-    while selected_image == 0 {
-        if RX_BUFFER.get(|buf| !buf.is_empty()) {
-            RX_BUFFER.get(|buf| {
-                if let Some(byte) = buf.read() {
-                    rx_byte = byte;
-                }
-            });
-            
-            match rx_byte {
-                b'U' | b'u' => {
-                    selected_image = 1; // Updater
-                    queue_string("Updating Updater image. Send firmware using XMODEM-1K...\r\n");
-                },
-                b'A' | b'a' => {
-                    selected_image = 2; // Application
-                    queue_string("Updating Application image. Send firmware using XMODEM-1K...\r\n");
-                },
-                b'X' | b'x' => {
-                    queue_string("Update canceled.\r\n");
-                    
-                    // Wait for transmission to complete
-                    while TX_IN_PROGRESS.load(Ordering::SeqCst) {
-                        ensure_transmitting();
-                    }
-                    
-                    // Go back to main menu
-                    queue_string("\x1B[2J\x1B[H");
-                    let message: &str = "\r\nPress 'U' to enter updater\r\n\
-                                        Press 'F' to update firmware\r\n\
-                                        Press 'Enter' to boot application\r\n\
-                                        Will boot automatically in 10 seconds...\r\n";
-                    queue_string(message);
-                    
-                    // Reset the timeout when returning to main menu
-                    let current_ms = systick::get_tick_ms();
-                    START_TIME.get(|time: &mut u32| *time = current_ms);
-                    
-                    return;
-                },
-                _ => {
-                    queue_string("Invalid selection. Please try again.\r\n");
-                    rx_byte = 0;
-                }
-            }
-        }
+    // This is where we should implement image update !!!
         
-        ensure_transmitting();
-    }
-    
-    // Make sure all pending transmissions are complete
-    while TX_IN_PROGRESS.load(Ordering::SeqCst) {
-        ensure_transmitting();
-    }
-    
-    // Set up flash parameters based on selection
-    let (target_address, expected_magic, slot_size) = match selected_image {
-        1 => (UPDATER_ADDR, misc::image::IMAGE_MAGIC_UPDATER, 96 * 1024), // Updater
-        2 => (SLOT_2_VER_ADDR, misc::image::IMAGE_MAGIC_APP, 384 * 1024), // Application
-        _ => return, // Should never happen
-    };
-    
-    // Clear buffers before starting
-    RX_BUFFER.get(|buf| buf.clear());
-    TX_BUFFER.get(|buf| buf.clear());
-    
-    // Wait a moment before starting XMODEM
-    let start_ms = systick::get_tick_ms();
-    while !systick::wait_ms(start_ms, 1000) {
-        ensure_transmitting();
-    }
-    
-    // Erase the target flash area before beginning transfer
-    let p = unsafe { stm32f4::Peripherals::steal() };
-    
-    if selected_image == 1 {
-        flash::erase_sector(&p, UPDATER_ADDR);
-    } else {
-        flash::erase_sector(&p, SLOT_2_VER_ADDR);
-        flash::erase_sector(&p, SLOT_2_VER_ADDR + 0x20000); // Next sector
-    }
-    
-    // Send ready signal
-    queue_string("\r\nReady to receive. Start your XMODEM transfer now...\r\n");
-    
-    // Wait for all message to be sent
-    while TX_IN_PROGRESS.load(Ordering::SeqCst) {
-        ensure_transmitting();
-    }
-    
-    // Start receiving firmware
-    let result = TX_BUFFER.get(|tx_buf| {
-        RX_BUFFER.get(|rx_buf| {
-            misc::xmodem::receive_firmware(
-                rx_buf,
-                tx_buf,
-                target_address,
-                expected_magic,
-                slot_size,
-                transmit_and_wait // Use the new function
-            )
-        })
-    });
-    
-    // Handle the result
-    match result {
-        Ok(_) => {
-            queue_string("\r\nFirmware update successful!\r\n");
-            
-            // Wait for message to be sent
-            while TX_IN_PROGRESS.load(Ordering::SeqCst) {
-                ensure_transmitting();
-            }
-        },
-        Err(err) => {
-            let error_msg = match err {
-                xmodem::XmodemError::Crc => "\r\nCRC error in transfer!\r\n",
-                xmodem::XmodemError::PacketNumber => "\r\nPacket number error in transfer!\r\n",
-                xmodem::XmodemError::Canceled => "\r\nTransfer was canceled!\r\n",
-                xmodem::XmodemError::InvalidMagic => "\r\nInvalid magic number in firmware!\r\n",
-                xmodem::XmodemError::OlderVersion => "\r\nNew firmware is not newer than current version!\r\n",
-                xmodem::XmodemError::Timeout => "\r\nTimeout during transfer!\r\n",
-                xmodem::XmodemError::FlashError => "\r\nError writing to flash memory!\r\n",
-                xmodem::XmodemError::InvalidPacket => "\r\nInvalid packet received!\r\n",
-                xmodem::XmodemError::EOT => "\r\nUnexpected end of transmission!\r\n",
-            };
-            
-            queue_string(error_msg);
-            
-            // Wait for message to be sent
-            while TX_IN_PROGRESS.load(Ordering::SeqCst) {
-                ensure_transmitting();
-            }
-        }
-    }
-    
-    // Delay before returning to menu
-    let start_ms = systick::get_tick_ms();
-    while !systick::wait_ms(start_ms, 2000) {
-        ensure_transmitting();
-    }
-    
-    // Return to main menu
-    queue_string("\x1B[2J\x1B[H");
-    let message: &str = "\r\nPress 'U' to enter updater\r\n\
-                         Press 'F' to update firmware\r\n\
-                         Press 'Enter' to boot application\r\n\
-                         Will boot automatically in 10 seconds...\r\n";
-    queue_string(message);
-    
-    // Reset the timeout when returning to main menu
-    let current_ms = systick::get_tick_ms();
-    START_TIME.get(|time: &mut u32| *time = current_ms);
 }
 
 #[no_mangle]
@@ -843,7 +630,7 @@ pub extern "C" fn USART2() {
 
                 // check data in RX buffer
                 if usart2.sr().read().rxne().bit_is_set() {
-                    let data = usart2.dr().read().bits() as u8;
+                    let data: u8 = usart2.dr().read().bits() as u8;
                     RX_BUFFER.get(|buf: &mut RingBuffer| {buf.write(data);
                     });
                 }

@@ -9,7 +9,6 @@ use misc::image::{ImageHeader, IMAGE_MAGIC_LOADER, IMAGE_MAGIC_UPDATER};
 
 const LOADER_ADDR: u32 = 0x08004000;
 const UPDATER_ADDR: u32 = 0x08008000;
-const IMAGE_HEADER_SIZE: usize = core::mem::size_of::<ImageHeader>();
 
 #[entry]
 fn main() -> ! {

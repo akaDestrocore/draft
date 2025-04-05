@@ -7,7 +7,7 @@ pub static TICK_MS: AtomicU32 = AtomicU32::new(0);
 
 // this must be called from SysTick handler
 pub fn increment_tick() {
-    let current = TICK_MS.load(Ordering::Relaxed);
+    let current: u32 = TICK_MS.load(Ordering::Relaxed);
     TICK_MS.store(current + 1, Ordering::Relaxed);
 }
 
@@ -18,7 +18,7 @@ pub fn get_tick_ms() -> u32 {
 
 // non-blocking API that returns true when time passed
 pub fn wait_ms(start_ms: u32, delay_ms: u32) -> bool {
-    let current_ms = get_tick_ms();
+    let current_ms: u32 = get_tick_ms();
     current_ms.wrapping_sub(start_ms) >= delay_ms
 }
 
