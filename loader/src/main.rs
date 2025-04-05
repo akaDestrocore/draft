@@ -15,9 +15,9 @@ use stm32f4::{self as pac, Peripherals};
 use misc::{
     ring_buffer::RingBuffer,
     image::{ImageHeader, SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER, IMAGE_MAGIC_APP, IMAGE_MAGIC_UPDATER},
-    xmodem::{handle_firmware_update, is_update_in_progress, process_xmodem_receive, start_firmware_update, queue_string},
     systick,
     flash,
+    xmodem,
 };
 
 #[no_mangle]
@@ -80,7 +80,6 @@ static GPIOD_PTR: Mutex<Option<PeripheralPtr<pac::gpiod::RegisterBlock>>> =
 
 #[entry]
 fn main() -> ! {
-    
     let p: Peripherals = match pac::Peripherals::take() {
         Some(p) => p,
         None => {
@@ -138,10 +137,14 @@ fn main() -> ! {
 
     loop {
         // Process input and firmware updates
-        process_input();
+        process_input(&p);
         
         // Process XMODEM state machine if active
-        process_xmodem_receive();
+        TX_BUFFER.get(|tx_buf| {
+            RX_BUFFER.get(|rx_buf| {
+                xmodem::process_xmodem_receive(&p, tx_buf, rx_buf);
+            });
+        });
 
         if LOAD_APPLICATION.load(Ordering::SeqCst) {
             boot_application(&p, &mut cp);
@@ -151,7 +154,9 @@ fn main() -> ! {
         let current_ms: u32 = systick::get_tick_ms();
         let start_ms: u32 = START_TIME.get(|time: &mut u32| *time);
         if (current_ms - start_ms) >= BOOT_TIMEOUT_MS {
-            queue_string("\r\nTimeout reached. Booting application...\r\n");
+            TX_BUFFER.get(|buf| {
+                xmodem::queue_string(buf, "\r\nTimeout reached. Booting application...\r\n");
+            });
             
             // wait to finish
             while TX_IN_PROGRESS.load(Ordering::SeqCst) {
@@ -324,22 +329,28 @@ pub fn ensure_transmitting() {
     }
 }
 
-fn process_input() {
+fn process_input(p: &pac::Peripherals) {
     if let Some(byte) = RX_BUFFER.get(|buf: &mut RingBuffer| buf.read()) {
         // If there's an update in progress, handle it separately
-        if is_update_in_progress() {
-            handle_firmware_update(byte);
+        if xmodem::is_update_in_progress() {
+            TX_BUFFER.get(|tx_buf| {
+                xmodem::handle_firmware_update(tx_buf, byte);
+            });
             return;
         }
 
         match byte {
             b'U' | b'u' => {
                 // Start firmware update
-                queue_string("\r\nStarting firmware update...\r\n");
-                start_firmware_update();
+                TX_BUFFER.get(|tx_buf| {
+                    xmodem::queue_string(tx_buf, "\r\nStarting firmware update...\r\n");
+                    xmodem::start_firmware_update(tx_buf);
+                });
             },
             b'F' | b'f' => {
-                queue_string("\r\nEntering firmware update mode...\r\n");
+                TX_BUFFER.get(|tx_buf| {
+                    xmodem::queue_string(tx_buf, "\r\nEntering firmware update mode...\r\n");
+                });
                 
                 // Reset timeout when entering firmware update mode
                 let current_ms: u32 = systick::get_tick_ms();
@@ -351,15 +362,21 @@ fn process_input() {
                 }
                 
                 // Start update process
-                start_firmware_update();
+                TX_BUFFER.get(|tx_buf| {
+                    xmodem::start_firmware_update(tx_buf);
+                });
             },
             b'\r' | b'\n' => {
                 let is_app_valid: bool = unsafe { *(APP_ADDR as *const u32) != 0xFFFFFFFF };
                 
                 if !is_app_valid {
-                    queue_string("\r\nValid application not found!\r\n");
+                    TX_BUFFER.get(|tx_buf| {
+                        xmodem::queue_string(tx_buf, "\r\nValid application not found!\r\n");
+                    });
                 } else {
-                    queue_string("\r\nBooting application...\r\n");
+                    TX_BUFFER.get(|tx_buf| {
+                        xmodem::queue_string(tx_buf, "\r\nBooting application...\r\n");
+                    });
                     LOAD_APPLICATION.store(true, Ordering::SeqCst);
                     
                     while TX_IN_PROGRESS.load(Ordering::SeqCst) {
@@ -369,10 +386,12 @@ fn process_input() {
             },
             _ => {
                 if byte != 0 {
-                    queue_string("\r\nPlease select from available options.\r\n");
-                    queue_string("\r\nPress 'U' to enter updater\r\n");
-                    queue_string("Press 'F' to update firmware\r\n");
-                    queue_string("Press 'Enter' to boot application\r\n");
+                    TX_BUFFER.get(|tx_buf| {
+                        xmodem::queue_string(tx_buf, "\r\nPlease select from available options.\r\n");
+                        xmodem::queue_string(tx_buf, "\r\nPress 'U' to enter updater\r\n");
+                        xmodem::queue_string(tx_buf, "Press 'F' to update firmware\r\n");
+                        xmodem::queue_string(tx_buf, "Press 'Enter' to boot application\r\n");
+                    });
                 }
             },
         }
@@ -466,7 +485,9 @@ fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
     };
 
     if !is_app_valid {
-        queue_string("\r\nValid application not found!\r\n");
+        TX_BUFFER.get(|tx_buf| {
+            xmodem::queue_string(tx_buf, "\r\nValid application not found!\r\n");
+        });
         
         while TX_IN_PROGRESS.load(Ordering::SeqCst) {
             ensure_transmitting();

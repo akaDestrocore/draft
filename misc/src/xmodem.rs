@@ -4,12 +4,12 @@ use core::{
 };
 use cortex_m::asm;
 use rmodem::{Control, OneKData, Sequence, XmodemOneKPacket};
+use stm32f4 as pac;
 
 use crate::{
     flash,
     image::{ImageHeader, IMAGE_MAGIC_APP, IMAGE_MAGIC_UPDATER, IMAGE_TYPE_APP, IMAGE_TYPE_UPDATER},
     ring_buffer::RingBuffer,
-    TX_BUFFER, RX_BUFFER,
 };
 
 // Constants for flash addresses (these should match your memory.x file)
@@ -30,36 +30,32 @@ static XMODEM_RECEIVE_STATE: AtomicU8 = AtomicU8::new(XMODEM_STATE_IDLE);
 static ERROR_MESSAGE: &str = "Unknown error";
 
 // Function to queue a string to be transmitted
-pub fn queue_string(s: &str) {
-    TX_BUFFER.get(|buf: &mut RingBuffer| {
-        for byte in s.bytes() {
-            buf.write(byte);
-        }
-    });
-    
-    ensure_transmitting();
+pub fn queue_string(tx_buffer: &RingBuffer, s: &str) {
+    for byte in s.bytes() {
+        tx_buffer.write(byte);
+    }
 }
 
 // Function to start the firmware update process
-pub fn start_firmware_update() {
+pub fn start_firmware_update(tx_buffer: &RingBuffer) {
     // Clear screen and show update options
-    queue_string("\r\n\r\nPlease select an update method:\r\n\r\n");
-    queue_string(" > 'A' - Update Application image\r\n\r\n");
-    queue_string(" > 'U' - Update Updater image\r\n\r\n");
+    queue_string(tx_buffer, "\r\n\r\nPlease select an update method:\r\n\r\n");
+    queue_string(tx_buffer, " > 'A' - Update Application image\r\n\r\n");
+    queue_string(tx_buffer, " > 'U' - Update Updater image\r\n\r\n");
     
     // Set update flag
     UPDATE_IN_PROGRESS.store(true, Ordering::SeqCst);
 }
 
 // Function to handle firmware update selection
-pub fn handle_firmware_update(rx_byte: u8) -> bool {
+pub fn handle_firmware_update(tx_buffer: &RingBuffer, rx_byte: u8) -> bool {
     if !UPDATE_IN_PROGRESS.load(Ordering::SeqCst) {
         return false;
     }
 
     match rx_byte {
         b'A' | b'a' => {
-            queue_string("\r\nPreparing to update application. Send firmware via XMODEM-1K...\r\n");
+            queue_string(tx_buffer, "\r\nPreparing to update application. Send firmware via XMODEM-1K...\r\n");
             UPDATE_TARGET_APP.store(true, Ordering::SeqCst);
             
             // Start XMODEM receive
@@ -67,7 +63,7 @@ pub fn handle_firmware_update(rx_byte: u8) -> bool {
             return true;
         },
         b'U' | b'u' => {
-            queue_string("\r\nPreparing to update updater. Send firmware via XMODEM-1K...\r\n");
+            queue_string(tx_buffer, "\r\nPreparing to update updater. Send firmware via XMODEM-1K...\r\n");
             UPDATE_TARGET_APP.store(false, Ordering::SeqCst);
             
             // Start XMODEM receive
@@ -75,7 +71,7 @@ pub fn handle_firmware_update(rx_byte: u8) -> bool {
             return true;
         },
         _ => {
-            queue_string("\r\nInvalid selection. Please choose 'A' or 'U'.\r\n");
+            queue_string(tx_buffer, "\r\nInvalid selection. Please choose 'A' or 'U'.\r\n");
             return true;
         }
     }
@@ -87,7 +83,7 @@ pub fn is_update_in_progress() -> bool {
 }
 
 // Function to process XMODEM receive state machine
-pub fn process_xmodem_receive() -> bool {
+pub fn process_xmodem_receive(p: &pac::Peripherals, tx_buffer: &RingBuffer, rx_buffer: &RingBuffer) -> bool {
     static mut RECEIVE_BUFFER: [u8; XmodemOneKPacket::LEN] = [0; XmodemOneKPacket::LEN];
     static mut CURRENT_ADDR: u32 = 0;
     static mut SEQUENCE: u8 = 1;
@@ -116,10 +112,7 @@ pub fn process_xmodem_receive() -> bool {
             }
             
             // Send 'C' character to initiate XMODEM-1K transfer
-            TX_BUFFER.get(|buf| {
-                buf.write(Control::Idle.into_u8());
-            });
-            ensure_transmitting();
+            tx_buffer.write(Control::Idle.into_u8());
             
             // Move to receiving state
             XMODEM_RECEIVE_STATE.store(XMODEM_STATE_RECEIVING, Ordering::SeqCst);
@@ -131,21 +124,15 @@ pub fn process_xmodem_receive() -> bool {
                 
                 // Resend 'C' every so often if no packet received
                 if FIRST_PACKET && TIMEOUT_COUNTER > 1000000 {
-                    TX_BUFFER.get(|buf| {
-                        buf.write(Control::Idle.into_u8());
-                    });
-                    ensure_transmitting();
+                    tx_buffer.write(Control::Idle.into_u8());
                     TIMEOUT_COUNTER = 0;
                 }
                 
                 // Check for EOT (End of Transmission)
-                if let Some(byte) = RX_BUFFER.get(|buf| buf.read()) {
+                if let Some(byte) = rx_buffer.read() {
                     if byte == Control::Eot.into_u8() {
                         // Acknowledge EOT
-                        TX_BUFFER.get(|buf| {
-                            buf.write(Control::Ack.into_u8());
-                        });
-                        ensure_transmitting();
+                        tx_buffer.write(Control::Ack.into_u8());
                         
                         // Update complete
                         XMODEM_RECEIVE_STATE.store(XMODEM_STATE_COMPLETE, Ordering::SeqCst);
@@ -154,11 +141,11 @@ pub fn process_xmodem_receive() -> bool {
                 }
                 
                 // If we have enough data, try to process a packet
-                let buffer_len = RX_BUFFER.get(|buf| buf.len());
+                let buffer_len = rx_buffer.len();
                 if buffer_len >= XmodemOneKPacket::LEN {
                     // Read the packet from the buffer
                     for i in 0..XmodemOneKPacket::LEN {
-                        if let Some(byte) = RX_BUFFER.get(|buf| buf.read()) {
+                        if let Some(byte) = rx_buffer.read() {
                             RECEIVE_BUFFER[i] = byte;
                         }
                     }
@@ -172,10 +159,7 @@ pub fn process_xmodem_receive() -> bool {
                             // Validate sequence number
                             if packet.sequence().into_u8() != SEQUENCE {
                                 // Wrong sequence number
-                                TX_BUFFER.get(|buf| {
-                                    buf.write(Control::Nak.into_u8());
-                                });
-                                ensure_transmitting();
+                                tx_buffer.write(Control::Nak.into_u8());
                                 return true;
                             }
                             
@@ -193,10 +177,7 @@ pub fn process_xmodem_receive() -> bool {
                                 
                                 if header.image_magic != expected_magic || header.image_type != expected_type {
                                     // Invalid header
-                                    TX_BUFFER.get(|buf| {
-                                        buf.write(Control::Nak.into_u8());
-                                    });
-                                    ensure_transmitting();
+                                    tx_buffer.write(Control::Nak.into_u8());
                                     
                                     ERROR_MESSAGE = "Invalid image header";
                                     XMODEM_RECEIVE_STATE.store(XMODEM_STATE_ERROR, Ordering::SeqCst);
@@ -213,10 +194,7 @@ pub fn process_xmodem_receive() -> bool {
                                     
                                     if !header.is_newer_than(current_header) {
                                         // Not newer version
-                                        TX_BUFFER.get(|buf| {
-                                            buf.write(Control::Nak.into_u8());
-                                        });
-                                        ensure_transmitting();
+                                        tx_buffer.write(Control::Nak.into_u8());
                                         
                                         ERROR_MESSAGE = "New firmware is not newer than current version";
                                         XMODEM_RECEIVE_STATE.store(XMODEM_STATE_ERROR, Ordering::SeqCst);
@@ -225,11 +203,8 @@ pub fn process_xmodem_receive() -> bool {
                                 }
                                 
                                 // Erase the target flash sector
-                                if flash::erase_sector(CURRENT_ADDR) == 0 {
-                                    TX_BUFFER.get(|buf| {
-                                        buf.write(Control::Nak.into_u8());
-                                    });
-                                    ensure_transmitting();
+                                if flash::erase_sector(p, CURRENT_ADDR) == 0 {
+                                    tx_buffer.write(Control::Nak.into_u8());
                                     
                                     ERROR_MESSAGE = "Failed to erase flash sector";
                                     XMODEM_RECEIVE_STATE.store(XMODEM_STATE_ERROR, Ordering::SeqCst);
@@ -239,13 +214,10 @@ pub fn process_xmodem_receive() -> bool {
                                 FIRST_PACKET = false;
                             }
                             
-                            // Write the data to flash
-                            let data = packet.data().inner();
-                            if flash::write(data, data.len() as u32, CURRENT_ADDR) != 0 {
-                                TX_BUFFER.get(|buf| {
-                                    buf.write(Control::Nak.into_u8());
-                                });
-                                ensure_transmitting();
+                            // Write the data to flash - get the data from the packet
+                            let packet_data = packet.data().inner();
+                            if flash::write(p, packet_data, CURRENT_ADDR) != 0 {
+                                tx_buffer.write(Control::Nak.into_u8());
                                 
                                 ERROR_MESSAGE = "Failed to write to flash";
                                 XMODEM_RECEIVE_STATE.store(XMODEM_STATE_ERROR, Ordering::SeqCst);
@@ -256,20 +228,14 @@ pub fn process_xmodem_receive() -> bool {
                             CURRENT_ADDR += OneKData::LEN as u32;
                             
                             // Acknowledge the packet
-                            TX_BUFFER.get(|buf| {
-                                buf.write(Control::Ack.into_u8());
-                            });
-                            ensure_transmitting();
+                            tx_buffer.write(Control::Ack.into_u8());
                             
                             // Increment sequence number for next packet
                             SEQUENCE = SEQUENCE.wrapping_add(1);
                         },
                         Err(_) => {
                             // Invalid packet
-                            TX_BUFFER.get(|buf| {
-                                buf.write(Control::Nak.into_u8());
-                            });
-                            ensure_transmitting();
+                            tx_buffer.write(Control::Nak.into_u8());
                         }
                     }
                 }
@@ -277,7 +243,7 @@ pub fn process_xmodem_receive() -> bool {
         },
         XMODEM_STATE_COMPLETE => {
             // Update completed successfully
-            queue_string("\r\nFirmware update complete!\r\n");
+            queue_string(tx_buffer, "\r\nFirmware update complete!\r\n");
             
             // Reset flags and state
             UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -288,9 +254,9 @@ pub fn process_xmodem_receive() -> bool {
         },
         XMODEM_STATE_ERROR => {
             // Update failed
-            queue_string("\r\nFirmware update failed: ");
-            queue_string(ERROR_MESSAGE);
-            queue_string("\r\n");
+            queue_string(tx_buffer, "\r\nFirmware update failed: ");
+            queue_string(tx_buffer, ERROR_MESSAGE);
+            queue_string(tx_buffer, "\r\n");
             
             // Reset flags and state
             UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
@@ -308,11 +274,6 @@ pub fn process_xmodem_receive() -> bool {
     
     // Return true to indicate state machine is still running
     true
-}
-
-// Ensure data is being transmitted
-pub fn ensure_transmitting() {
-    // Already defined in your code - we'll use the existing version
 }
 
 // Delay function
