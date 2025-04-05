@@ -2,7 +2,9 @@
 #![no_main]
 
 use core::{
-    cell::UnsafeCell, panic::PanicInfo, sync::atomic::{AtomicBool, Ordering}
+    cell::UnsafeCell, 
+    panic::PanicInfo, 
+    sync::atomic::{AtomicBool, Ordering}
 };
 
 use cortex_m::{
@@ -17,7 +19,15 @@ use misc::{
     image::{ImageHeader, SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER, IMAGE_MAGIC_APP, IMAGE_MAGIC_UPDATER},
     systick,
     flash,
-    xmodem,
+    firmware_update::{
+        process_xmodem, 
+        start_update, 
+        get_state, 
+        set_state, 
+        is_update_in_progress, 
+        queue_string,
+        XmodemState
+    }
 };
 
 #[no_mangle]
@@ -122,7 +132,7 @@ fn main() -> ! {
     };
     GPIOD_PTR.get(|ptr| *ptr = Some(PeripheralPtr(gpiod_ptr)));
 
-    send_welcome_message_polling(&p);
+    send_welcome_message(&p);
 
     unsafe {
         cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USART2);
@@ -134,17 +144,65 @@ fn main() -> ! {
         );
     }
 
+    // Firmware update menu state variables
+    let mut update_option_selected = false;
+    
     loop {
-        // Process input and firmware updates
-        process_input(&p);
-        
-        // Process XMODEM state machine if active
-        TX_BUFFER.get(|tx_buf| {
-            RX_BUFFER.get(|rx_buf| {
-                xmodem::process_xmodem_receive(&p, tx_buf, rx_buf);
+        // Process input and firmware updates if not already in progress
+        if !is_update_in_progress() {
+            if let Some(byte) = RX_BUFFER.get(|buf| buf.read()) {
+                handle_user_input(&p, byte, &mut update_option_selected);
+            }
+        } else {
+            // Process XMODEM protocol if update is in progress
+            TX_BUFFER.get(|tx_buf| {
+                RX_BUFFER.get(|rx_buf| {
+                    process_xmodem(&p, tx_buf, rx_buf);
+                });
             });
-        });
-
+            
+            // Check if XMODEM has completed or errored
+            match get_state() {
+                XmodemState::Complete => {
+                    // Wait for last transmissions to complete
+                    while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+                        ensure_transmitting();
+                    }
+                    
+                    // Boot the newly updated firmware
+                    let is_app_update = unsafe { *(APP_ADDR as *const u32) != 0xFFFFFFFF };
+                    if is_app_update {
+                        TX_BUFFER.get(|tx_buf| {
+                            queue_string(tx_buf, "\r\nApplication update successful, booting...\r\n");
+                        });
+                        while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+                            ensure_transmitting();
+                        }
+                        boot_application(&p, &mut cp);
+                    } else {
+                        TX_BUFFER.get(|tx_buf| {
+                            queue_string(tx_buf, "\r\nUpdater update successful, booting...\r\n");
+                        });
+                        while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+                            ensure_transmitting();
+                        }
+                        boot_updater(&p, &mut cp);
+                    }
+                },
+                XmodemState::Error => {
+                    // Reset to menu
+                    set_state(XmodemState::Idle);
+                    update_option_selected = false;
+                    TX_BUFFER.get(|tx_buf| {
+                        queue_string(tx_buf, "\r\nUpdate failed! Returning to menu.\r\n");
+                        show_menu(tx_buf);
+                    });
+                },
+                _ => {}
+            }
+        }
+        
+        // Check if boot actions are requested
         if LOAD_APPLICATION.load(Ordering::SeqCst) {
             boot_application(&p, &mut cp);
         }
@@ -154,12 +212,12 @@ fn main() -> ! {
         }
 
         // check timeout - only if no firmware update is in progress
-        if !xmodem::is_update_in_progress() {
+        if !is_update_in_progress() && !update_option_selected {
             let current_ms: u32 = systick::get_tick_ms();
             let start_ms: u32 = START_TIME.get(|time: &mut u32| *time);
             if (current_ms - start_ms) >= BOOT_TIMEOUT_MS {
                 TX_BUFFER.get(|buf| {
-                    xmodem::queue_string(buf, "\r\nTimeout reached. Booting application...\r\n");
+                    queue_string(buf, "\r\nTimeout reached. Booting application...\r\n");
                 });
                 
                 // wait to finish
@@ -287,27 +345,19 @@ fn setup_usart(p: &Peripherals) {
     });
 }
 
-fn send_welcome_message_polling(p: &Peripherals) {
-    let message: &str = "\r\n****************************************\r\n\
-                         *            Bootloader v1.0.0           *\r\n\
-                         ****************************************\r\n\r\n\
-                         Press 'U' to enter updater\r\n\
-                         Press 'F' to update firmware\r\n\
-                         Press 'Enter' to boot application\r\n\
-                         Will boot automatically in 10 seconds...\r\n";
+fn send_welcome_message(p: &Peripherals) {
+    TX_BUFFER.get(|tx_buf| {
+        queue_string(tx_buf, "\r\n****************************************\r\n");
+        queue_string(tx_buf, "*            Bootloader v1.0.0           *\r\n");
+        queue_string(tx_buf, "****************************************\r\n\r\n");
+        queue_string(tx_buf, "Press 'U' to enter updater\r\n");
+        queue_string(tx_buf, "Press 'F' to update firmware\r\n");
+        queue_string(tx_buf, "Press 'Enter' to boot application\r\n");
+        queue_string(tx_buf, "Will boot automatically in 10 seconds...\r\n");
+    });
     
-    for byte in message.bytes() {
-        while p.usart2.sr().read().txe().bit_is_clear() {
-            // wait TX empty
-        }
-        
-        // send byte
-        p.usart2.dr().write(|w| unsafe { w.bits(byte as u16) });
-    }
-    
-    while p.usart2.sr().read().tc().bit_is_clear() {
-        // wait TC
-    }
+    // Ensure transmission starts
+    ensure_transmitting();
 }
 
 pub fn ensure_transmitting() {
@@ -334,65 +384,67 @@ pub fn ensure_transmitting() {
     }
 }
 
-fn process_input(p: &pac::Peripherals) {
-    if let Some(byte) = RX_BUFFER.get(|buf: &mut RingBuffer| buf.read()) {
-        // If there's an update in progress, handle it separately
-        if xmodem::is_update_in_progress() {
-            TX_BUFFER.get(|tx_buf| {
-                xmodem::handle_firmware_update(tx_buf, byte);
-            });
-            return;
-        }
-
-        match byte {
-            b'U' | b'u' => {
-                // Boot to updater
-                let is_updater_valid: bool = unsafe { *(UPDATER_ADDR as *const u32) != 0xFFFFFFFF };
-                
-                if !is_updater_valid {
-                    TX_BUFFER.get(|tx_buf| {
-                        xmodem::queue_string(tx_buf, "\r\nValid updater not found!\r\n");
-                    });
-                } else {
-                    TX_BUFFER.get(|tx_buf| {
-                        xmodem::queue_string(tx_buf, "\r\nBooting updater...\r\n");
-                    });
-                    LOAD_UPDATER.store(true, Ordering::SeqCst);
-                    
-                    while TX_IN_PROGRESS.load(Ordering::SeqCst) {
-                        ensure_transmitting();
-                    }
-                }
-            },
-            b'F' | b'f' => {
+fn handle_user_input(p: &pac::Peripherals, byte: u8, update_option_selected: &mut bool) {
+    match byte {
+        b'U' | b'u' => {
+            // Boot updater if available
+            let is_updater_valid: bool = unsafe { *(UPDATER_ADDR as *const u32) != 0xFFFFFFFF };
+            
+            if !is_updater_valid {
                 TX_BUFFER.get(|tx_buf| {
-                    xmodem::queue_string(tx_buf, "\r\nEntering firmware update mode...\r\n");
+                    queue_string(tx_buf, "\r\nValid updater not found!\r\n");
                 });
+            } else {
+                TX_BUFFER.get(|tx_buf| {
+                    queue_string(tx_buf, "\r\nBooting updater...\r\n");
+                });
+                LOAD_UPDATER.store(true, Ordering::SeqCst);
                 
-                // Reset timeout when entering firmware update mode - by setting a very long timeout
-                let current_ms: u32 = systick::get_tick_ms();
-                START_TIME.get(|time: &mut u32| *time = current_ms + BOOT_TIMEOUT_MS * 1000);
-                
-                // Wait for transmission to complete
                 while TX_IN_PROGRESS.load(Ordering::SeqCst) {
                     ensure_transmitting();
                 }
-                
-                // Start update process
+            }
+        },
+        b'F' | b'f' => {
+            if !*update_option_selected {
+                *update_option_selected = true;
                 TX_BUFFER.get(|tx_buf| {
-                    xmodem::start_firmware_update(tx_buf);
+                    queue_string(tx_buf, "\r\n****************************************\r\n");
+                    queue_string(tx_buf, "*           Firmware Update            *\r\n");
+                    queue_string(tx_buf, "****************************************\r\n\r\n");
+                    queue_string(tx_buf, "Please select an update method:\r\n\r\n");
+                    queue_string(tx_buf, " > 'A' - Update Application image\r\n\r\n");
+                    queue_string(tx_buf, " > 'U' - Update Updater image\r\n\r\n");
                 });
-            },
-            b'\r' | b'\n' => {
+            }
+        },
+        b'A' | b'a' => {
+            if *update_option_selected {
+                TX_BUFFER.get(|tx_buf| {
+                    start_update(tx_buf, APP_ADDR, true);
+                });
+                *update_option_selected = false;
+            }
+        },
+        b'U' => {
+            if *update_option_selected {
+                TX_BUFFER.get(|tx_buf| {
+                    start_update(tx_buf, UPDATER_ADDR, false);
+                });
+                *update_option_selected = false;
+            }
+        },
+        b'\r' | b'\n' => {
+            if !*update_option_selected {
                 let is_app_valid: bool = unsafe { *(APP_ADDR as *const u32) != 0xFFFFFFFF };
                 
                 if !is_app_valid {
                     TX_BUFFER.get(|tx_buf| {
-                        xmodem::queue_string(tx_buf, "\r\nValid application not found!\r\n");
+                        queue_string(tx_buf, "\r\nValid application not found!\r\n");
                     });
                 } else {
                     TX_BUFFER.get(|tx_buf| {
-                        xmodem::queue_string(tx_buf, "\r\nBooting application...\r\n");
+                        queue_string(tx_buf, "\r\nBooting application...\r\n");
                     });
                     LOAD_APPLICATION.store(true, Ordering::SeqCst);
                     
@@ -400,19 +452,23 @@ fn process_input(p: &pac::Peripherals) {
                         ensure_transmitting();
                     }
                 }
-            },
-            _ => {
-                if byte != 0 {
-                    TX_BUFFER.get(|tx_buf| {
-                        xmodem::queue_string(tx_buf, "\r\nPlease select from available options.\r\n");
-                        xmodem::queue_string(tx_buf, "\r\nPress 'U' to enter updater\r\n");
-                        xmodem::queue_string(tx_buf, "Press 'F' to update firmware\r\n");
-                        xmodem::queue_string(tx_buf, "Press 'Enter' to boot application\r\n");
-                    });
-                }
-            },
-        }
+            }
+        },
+        _ => {
+            if byte != 0 && !*update_option_selected {
+                TX_BUFFER.get(|tx_buf| {
+                    show_menu(tx_buf);
+                });
+            }
+        },
     }
+}
+
+fn show_menu(tx_buffer: &RingBuffer) {
+    queue_string(tx_buffer, "\r\nPlease select from available options:\r\n");
+    queue_string(tx_buffer, " > 'U' - Boot updater\r\n");
+    queue_string(tx_buffer, " > 'F' - Update firmware\r\n");
+    queue_string(tx_buffer, " > 'Enter' - Boot application\r\n");
 }
 
 fn rcc_deinit(p: &Peripherals) {
@@ -503,7 +559,7 @@ fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
 
     if !is_app_valid {
         TX_BUFFER.get(|tx_buf| {
-            xmodem::queue_string(tx_buf, "\r\nValid application not found!\r\n");
+            queue_string(tx_buf, "\r\nValid application not found!\r\n");
         });
         
         while TX_IN_PROGRESS.load(Ordering::SeqCst) {
@@ -571,7 +627,7 @@ fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
 
     if !is_updater_valid {
         TX_BUFFER.get(|tx_buf| {
-            xmodem::queue_string(tx_buf, "\r\nValid updater not found!\r\n");
+            queue_string(tx_buf, "\r\nValid updater not found!\r\n");
         });
         
         while TX_IN_PROGRESS.load(Ordering::SeqCst) {
@@ -637,7 +693,8 @@ pub extern "C" fn USART2() {
                 // check data in RX buffer
                 if usart2.sr().read().rxne().bit_is_set() {
                     let data: u8 = usart2.dr().read().bits() as u8;
-                    RX_BUFFER.get(|buf: &mut RingBuffer| {buf.write(data);
+                    RX_BUFFER.get(|buf: &mut RingBuffer| {
+                        buf.write(data);
                     });
                 }
 
