@@ -32,7 +32,7 @@ static mut LAST_C_TIME: u32 = 0;
 static mut C_SENT_COUNT: u8 = 0;
 
 // Buffer for packet reception
-static mut PARTIAL_PACKET: [u8; 133] = [0; 133]; // SOH + SEQ + COMPLEMENTED_SEQ + DATA[128] + CRC[2]
+static mut PARTIAL_PACKET: [u8; 1029] = [0; 1029]; // Increased to handle 1K packets
 static mut BUFFER_INDEX: usize = 0;
 
 // Get current XMODEM state
@@ -111,12 +111,12 @@ pub fn start_update(tx_buffer: &RingBuffer, target_addr: u32, is_app_update: boo
     unsafe {
         CURRENT_ADDRESS = target_addr;
         BUFFER_INDEX = 0;
-        PARTIAL_PACKET = [0; 133];
+        PARTIAL_PACKET = [0; 1029];
         LAST_C_TIME = systick::get_tick_ms();
         C_SENT_COUNT = 0; // Reset the counter
     }
     
-    // Send message to terminal
+    // Only send message before starting the protocol
     queue_string(tx_buffer, "\r\nStarting firmware update. Send file using XMODEM-CRC protocol...\r\n");
     
     // Send 'C' to request XMODEM-CRC transfer - first C character
@@ -139,12 +139,12 @@ pub fn process_xmodem(p: &pac::Peripherals, tx_buffer: &RingBuffer, rx_buffer: &
             if current_time.wrapping_sub(LAST_C_TIME) >= 300 {
                 tx_buffer.write(Control::Idle.into_u8());
                 LAST_C_TIME = current_time;
+                C_SENT_COUNT += 1;
                 
                 // Only move to Receiving state after a certain number of attempts
                 if C_SENT_COUNT >= 10 {
                     // Move to Receiving state after sending enough 'C' characters
                     set_state(XmodemState::Receiving);
-                    queue_string(tx_buffer, "Entering receiving state...\r\n");
                 }
             }
         }
@@ -169,7 +169,10 @@ fn process_byte(p: &pac::Peripherals, tx_buffer: &RingBuffer, byte: u8) -> bool 
         // Check for EOT (End of Transmission)
         if BUFFER_INDEX == 0 && byte == Control::Eot.into_u8() {
             tx_buffer.write(Control::Ack.into_u8());
+            
+            // Only send a message after completing the protocol
             queue_string(tx_buffer, "\r\nFirmware update completed successfully!\r\n");
+            
             set_state(XmodemState::Complete);
             UPDATE_IN_PROGRESS.store(false, Ordering::Relaxed);
             return true;
@@ -179,8 +182,14 @@ fn process_byte(p: &pac::Peripherals, tx_buffer: &RingBuffer, byte: u8) -> bool 
         PARTIAL_PACKET[BUFFER_INDEX] = byte;
         BUFFER_INDEX += 1;
         
-        // Check if we have a complete packet
-        if BUFFER_INDEX == 133 { // Complete XMODEM packet
+        // Check if we have a complete packet (handle both 128 byte and 1K packets)
+        let packet_size = if BUFFER_INDEX > 0 && PARTIAL_PACKET[0] == Control::Stx.into_u8() {
+            1029 // STX + SEQ + COMPLEMENTED_SEQ + DATA[1024] + CRC[2]
+        } else {
+            133  // SOH + SEQ + COMPLEMENTED_SEQ + DATA[128] + CRC[2]
+        };
+        
+        if BUFFER_INDEX == packet_size {
             BUFFER_INDEX = 0; // Reset for next packet
             
             // Try to parse packet using rmodem
@@ -189,22 +198,16 @@ fn process_byte(p: &pac::Peripherals, tx_buffer: &RingBuffer, byte: u8) -> bool 
                     // Verify sequence number
                     let expected_seq = SEQUENCE.load(Ordering::Relaxed);
                     if packet.sequence().into_u8() != expected_seq {
-                        queue_string(tx_buffer, "\r\nSequence error. Expected: ");
-                        write_u8_decimal(tx_buffer, expected_seq);
-                        queue_string(tx_buffer, ", Got: ");
-                        write_u8_decimal(tx_buffer, packet.sequence().into_u8());
-                        queue_string(tx_buffer, "\r\n");
-                        
-                        // Send NAK for retry - critical to ensure reliable transmission
+                        // Just send NAK without debug text
                         tx_buffer.write(Control::Nak.into_u8());
                         return false;
                     }
                     
                     // For first packet, verify header
                     if FIRST_PACKET.load(Ordering::Relaxed) {
-                        let valid = validate_header(p, tx_buffer, packet.data().inner());
+                        let valid = validate_header(packet.data().inner());
                         if !valid {
-                            // Cancel on invalid header
+                            // Cancel on invalid header - no debug output
                             tx_buffer.write(Control::Can.into_u8());
                             tx_buffer.write(Control::Can.into_u8());
                             tx_buffer.write(Control::Can.into_u8());
@@ -213,8 +216,7 @@ fn process_byte(p: &pac::Peripherals, tx_buffer: &RingBuffer, byte: u8) -> bool 
                             return true;
                         }
                         
-                        // Erase flash sector for first packet
-                        queue_string(tx_buffer, "Erasing flash sector...\r\n");
+                        // Erase flash sector for first packet - no debug output
                         flash::erase_sector(p, CURRENT_ADDRESS);
                         
                         FIRST_PACKET.store(false, Ordering::Relaxed);
@@ -223,7 +225,7 @@ fn process_byte(p: &pac::Peripherals, tx_buffer: &RingBuffer, byte: u8) -> bool 
                     // Write data to flash
                     let result = flash::write(p, packet.data().inner(), CURRENT_ADDRESS);
                     if result != 0 {
-                        queue_string(tx_buffer, "\r\nFlash write error! Aborting...\r\n");
+                        // Just cancel without debug output
                         tx_buffer.write(Control::Can.into_u8());
                         tx_buffer.write(Control::Can.into_u8());
                         tx_buffer.write(Control::Can.into_u8());
@@ -241,24 +243,22 @@ fn process_byte(p: &pac::Peripherals, tx_buffer: &RingBuffer, byte: u8) -> bool 
                     SEQUENCE.store(next_seq, Ordering::Relaxed);
                 },
                 Err(_) => {
-                    // Send NAK for invalid packet
-                    queue_string(tx_buffer, "\r\nInvalid packet format. Requesting retry.\r\n");
+                    // Send NAK for invalid packet - no debug output
                     tx_buffer.write(Control::Nak.into_u8());
                 }
             }
-        } else if BUFFER_INDEX > 133 {
-            // Buffer overflow - reset
+        } else if BUFFER_INDEX > packet_size {
+            // Buffer overflow - reset without debug output
             BUFFER_INDEX = 0;
             tx_buffer.write(Control::Nak.into_u8());
-            queue_string(tx_buffer, "\r\nBuffer overflow. Requesting retry.\r\n");
         }
     }
     
     false
 }
 
-// Function to validate the image header
-fn validate_header(p: &pac::Peripherals, tx_buffer: &RingBuffer, data: &[u8]) -> bool {
+// Function to validate the image header - removed all debug outputs
+fn validate_header(data: &[u8]) -> bool {
     // Cast the first bytes to an ImageHeader
     let header = unsafe { &*(data.as_ptr() as *const ImageHeader) };
     
@@ -269,25 +269,8 @@ fn validate_header(p: &pac::Peripherals, tx_buffer: &RingBuffer, data: &[u8]) ->
         (IMAGE_MAGIC_UPDATER, IMAGE_TYPE_UPDATER)
     };
     
-    // Output header info for debugging
-    queue_string(tx_buffer, "\r\nValidating image header:\r\n");
-    queue_string(tx_buffer, "  Magic: 0x");
-    write_u32_hex(tx_buffer, header.image_magic);
-    
-    queue_string(tx_buffer, " (expected: 0x");
-    write_u32_hex(tx_buffer, expected_magic);
-    queue_string(tx_buffer, ")\r\n");
-    
-    queue_string(tx_buffer, "  Type: ");
-    write_u8_decimal(tx_buffer, header.image_type);
-    
-    queue_string(tx_buffer, " (expected: ");
-    write_u8_decimal(tx_buffer, expected_type);
-    queue_string(tx_buffer, ")\r\n");
-    
     // Check magic number and type
     if header.image_magic != expected_magic || header.image_type != expected_type {
-        queue_string(tx_buffer, "\r\nInvalid image header!\r\n");
         return false;
     }
     
@@ -298,28 +281,10 @@ fn validate_header(p: &pac::Peripherals, tx_buffer: &RingBuffer, data: &[u8]) ->
             let existing_header = &*(dest_addr as *const ImageHeader);
             
             if expected_magic == existing_header.image_magic {
-                queue_string(tx_buffer, "  Version: ");
-                write_u8_decimal(tx_buffer, header.version_major);
-                queue_string(tx_buffer, ".");
-                write_u8_decimal(tx_buffer, header.version_minor);
-                queue_string(tx_buffer, ".");
-                write_u8_decimal(tx_buffer, header.version_patch);
-                
-                queue_string(tx_buffer, " (current: ");
-                write_u8_decimal(tx_buffer, existing_header.version_major);
-                queue_string(tx_buffer, ".");
-                write_u8_decimal(tx_buffer, existing_header.version_minor);
-                queue_string(tx_buffer, ".");
-                write_u8_decimal(tx_buffer, existing_header.version_patch);
-                queue_string(tx_buffer, ")\r\n");
-                
                 if !header.is_newer_than(existing_header) {
-                    queue_string(tx_buffer, "\r\nNew firmware is not newer than current version!\r\n");
                     return false;
                 }
             }
-        } else {
-            queue_string(tx_buffer, "  No existing firmware detected\r\n");
         }
     }
     
