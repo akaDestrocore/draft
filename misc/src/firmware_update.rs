@@ -1,5 +1,3 @@
-#![no_std]
-
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use stm32f4 as pac;
 
@@ -31,6 +29,7 @@ static UPDATE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 static mut CURRENT_ADDRESS: u32 = 0;
 static mut LAST_C_TIME: u32 = 0;
+static mut C_SENT_COUNT: u8 = 0;
 
 // Buffer for packet reception
 static mut PARTIAL_PACKET: [u8; 133] = [0; 133]; // SOH + SEQ + COMPLEMENTED_SEQ + DATA[128] + CRC[2]
@@ -72,6 +71,34 @@ pub fn queue_string(tx_buffer: &RingBuffer, s: &str) {
     }
 }
 
+// Convert a u8 value to ASCII digits and send to buffer
+fn write_u8_decimal(tx_buffer: &RingBuffer, value: u8) {
+    if value >= 100 {
+        tx_buffer.write(b'0' + (value / 100));
+        tx_buffer.write(b'0' + ((value / 10) % 10));
+        tx_buffer.write(b'0' + (value % 10));
+    } else if value >= 10 {
+        tx_buffer.write(b'0' + (value / 10));
+        tx_buffer.write(b'0' + (value % 10));
+    } else {
+        tx_buffer.write(b'0' + value);
+    }
+}
+
+// Convert a u32 value to hex string and send to buffer
+fn write_u32_hex(tx_buffer: &RingBuffer, value: u32) {
+    static HEX_DIGITS: [u8; 16] = *b"0123456789ABCDEF";
+    
+    tx_buffer.write(HEX_DIGITS[((value >> 28) & 0xF) as usize]);
+    tx_buffer.write(HEX_DIGITS[((value >> 24) & 0xF) as usize]);
+    tx_buffer.write(HEX_DIGITS[((value >> 20) & 0xF) as usize]);
+    tx_buffer.write(HEX_DIGITS[((value >> 16) & 0xF) as usize]);
+    tx_buffer.write(HEX_DIGITS[((value >> 12) & 0xF) as usize]);
+    tx_buffer.write(HEX_DIGITS[((value >> 8) & 0xF) as usize]);
+    tx_buffer.write(HEX_DIGITS[((value >> 4) & 0xF) as usize]);
+    tx_buffer.write(HEX_DIGITS[(value & 0xF) as usize]);
+}
+
 // Helper function to start the firmware update process
 pub fn start_update(tx_buffer: &RingBuffer, target_addr: u32, is_app_update: bool) {
     // Reset state
@@ -86,12 +113,13 @@ pub fn start_update(tx_buffer: &RingBuffer, target_addr: u32, is_app_update: boo
         BUFFER_INDEX = 0;
         PARTIAL_PACKET = [0; 133];
         LAST_C_TIME = systick::get_tick_ms();
+        C_SENT_COUNT = 0; // Reset the counter
     }
     
     // Send message to terminal
     queue_string(tx_buffer, "\r\nStarting firmware update. Send file using XMODEM-CRC protocol...\r\n");
     
-    // Send 'C' to request XMODEM-CRC transfer
+    // Send 'C' to request XMODEM-CRC transfer - first C character
     tx_buffer.write(Control::Idle.into_u8());
 }
 
@@ -102,23 +130,28 @@ pub fn process_xmodem(p: &pac::Peripherals, tx_buffer: &RingBuffer, rx_buffer: &
         return false;
     }
     
-    // Periodically send 'C' in Init state
+    // Periodically send 'C' in Init state - more aggressively
     if state == XmodemState::Init {
         let current_time = systick::get_tick_ms();
         
         unsafe {
-            if current_time.wrapping_sub(LAST_C_TIME) >= 1000 {
+            // Send 'C' more frequently (every 300ms) for the first 10 attempts
+            if current_time.wrapping_sub(LAST_C_TIME) >= 300 {
                 tx_buffer.write(Control::Idle.into_u8());
                 LAST_C_TIME = current_time;
                 
-                // Move to Receiving state after sending 'C'
-                set_state(XmodemState::Receiving);
+                // Only move to Receiving state after a certain number of attempts
+                if C_SENT_COUNT >= 10 {
+                    // Move to Receiving state after sending enough 'C' characters
+                    set_state(XmodemState::Receiving);
+                    queue_string(tx_buffer, "Entering receiving state...\r\n");
+                }
             }
         }
     }
     
     // Process available bytes in receiving state
-    if state == XmodemState::Receiving {
+    if state == XmodemState::Receiving || state == XmodemState::Init {
         while let Some(byte) = rx_buffer.read() {
             match process_byte(p, tx_buffer, byte) {
                 true => return true, // Transfer completed or error
@@ -157,12 +190,12 @@ fn process_byte(p: &pac::Peripherals, tx_buffer: &RingBuffer, byte: u8) -> bool 
                     let expected_seq = SEQUENCE.load(Ordering::Relaxed);
                     if packet.sequence().into_u8() != expected_seq {
                         queue_string(tx_buffer, "\r\nSequence error. Expected: ");
-                        queue_dec_u8(tx_buffer, expected_seq);
+                        write_u8_decimal(tx_buffer, expected_seq);
                         queue_string(tx_buffer, ", Got: ");
-                        queue_dec_u8(tx_buffer, packet.sequence().into_u8());
+                        write_u8_decimal(tx_buffer, packet.sequence().into_u8());
                         queue_string(tx_buffer, "\r\n");
                         
-                        // Send NAK for retry
+                        // Send NAK for retry - critical to ensure reliable transmission
                         tx_buffer.write(Control::Nak.into_u8());
                         return false;
                     }
@@ -213,6 +246,11 @@ fn process_byte(p: &pac::Peripherals, tx_buffer: &RingBuffer, byte: u8) -> bool 
                     tx_buffer.write(Control::Nak.into_u8());
                 }
             }
+        } else if BUFFER_INDEX > 133 {
+            // Buffer overflow - reset
+            BUFFER_INDEX = 0;
+            tx_buffer.write(Control::Nak.into_u8());
+            queue_string(tx_buffer, "\r\nBuffer overflow. Requesting retry.\r\n");
         }
     }
     
@@ -234,15 +272,17 @@ fn validate_header(p: &pac::Peripherals, tx_buffer: &RingBuffer, data: &[u8]) ->
     // Output header info for debugging
     queue_string(tx_buffer, "\r\nValidating image header:\r\n");
     queue_string(tx_buffer, "  Magic: 0x");
-    queue_hex_u32(tx_buffer, header.image_magic);
+    write_u32_hex(tx_buffer, header.image_magic);
+    
     queue_string(tx_buffer, " (expected: 0x");
-    queue_hex_u32(tx_buffer, expected_magic);
+    write_u32_hex(tx_buffer, expected_magic);
     queue_string(tx_buffer, ")\r\n");
     
     queue_string(tx_buffer, "  Type: ");
-    queue_dec_u8(tx_buffer, header.image_type);
+    write_u8_decimal(tx_buffer, header.image_type);
+    
     queue_string(tx_buffer, " (expected: ");
-    queue_dec_u8(tx_buffer, expected_type);
+    write_u8_decimal(tx_buffer, expected_type);
     queue_string(tx_buffer, ")\r\n");
     
     // Check magic number and type
@@ -259,17 +299,18 @@ fn validate_header(p: &pac::Peripherals, tx_buffer: &RingBuffer, data: &[u8]) ->
             
             if expected_magic == existing_header.image_magic {
                 queue_string(tx_buffer, "  Version: ");
-                queue_dec_u8(tx_buffer, header.version_major);
+                write_u8_decimal(tx_buffer, header.version_major);
                 queue_string(tx_buffer, ".");
-                queue_dec_u8(tx_buffer, header.version_minor);
+                write_u8_decimal(tx_buffer, header.version_minor);
                 queue_string(tx_buffer, ".");
-                queue_dec_u8(tx_buffer, header.version_patch);
+                write_u8_decimal(tx_buffer, header.version_patch);
+                
                 queue_string(tx_buffer, " (current: ");
-                queue_dec_u8(tx_buffer, existing_header.version_major);
+                write_u8_decimal(tx_buffer, existing_header.version_major);
                 queue_string(tx_buffer, ".");
-                queue_dec_u8(tx_buffer, existing_header.version_minor);
+                write_u8_decimal(tx_buffer, existing_header.version_minor);
                 queue_string(tx_buffer, ".");
-                queue_dec_u8(tx_buffer, existing_header.version_patch);
+                write_u8_decimal(tx_buffer, existing_header.version_patch);
                 queue_string(tx_buffer, ")\r\n");
                 
                 if !header.is_newer_than(existing_header) {
@@ -283,31 +324,4 @@ fn validate_header(p: &pac::Peripherals, tx_buffer: &RingBuffer, data: &[u8]) ->
     }
     
     true
-}
-
-// Helper functions for text output
-fn queue_dec_u8(tx_buffer: &RingBuffer, value: u8) {
-    if value < 10 {
-        tx_buffer.write(b'0' + value);
-    } else if value < 100 {
-        tx_buffer.write(b'0' + (value / 10));
-        tx_buffer.write(b'0' + (value % 10));
-    } else {
-        tx_buffer.write(b'0' + (value / 100));
-        tx_buffer.write(b'0' + ((value / 10) % 10));
-        tx_buffer.write(b'0' + (value % 10));
-    }
-}
-
-fn queue_hex_u32(tx_buffer: &RingBuffer, value: u32) {
-    const HEX_DIGITS: [u8; 16] = *b"0123456789ABCDEF";
-    
-    tx_buffer.write(HEX_DIGITS[((value >> 28) & 0xF) as usize]);
-    tx_buffer.write(HEX_DIGITS[((value >> 24) & 0xF) as usize]);
-    tx_buffer.write(HEX_DIGITS[((value >> 20) & 0xF) as usize]);
-    tx_buffer.write(HEX_DIGITS[((value >> 16) & 0xF) as usize]);
-    tx_buffer.write(HEX_DIGITS[((value >> 12) & 0xF) as usize]);
-    tx_buffer.write(HEX_DIGITS[((value >> 8) & 0xF) as usize]);
-    tx_buffer.write(HEX_DIGITS[((value >> 4) & 0xF) as usize]);
-    tx_buffer.write(HEX_DIGITS[(value & 0xF) as usize]);
 }

@@ -157,49 +157,56 @@ fn main() -> ! {
             // Process XMODEM protocol if update is in progress
             TX_BUFFER.get(|tx_buf| {
                 RX_BUFFER.get(|rx_buf| {
-                    process_xmodem(&p, tx_buf, rx_buf);
+                    let result = process_xmodem(&p, tx_buf, rx_buf);
+                    
+                    // Handle completion or error state
+                    if result {
+                        match get_state() {
+                            XmodemState::Complete => {
+                                // Wait for last transmissions to complete
+                                while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+                                    ensure_transmitting();
+                                }
+                                
+                                // Add small delay to ensure everything is processed
+                                let start_ms = systick::get_tick_ms();
+                                while !systick::wait_ms(start_ms, 100) {
+                                    asm::nop();
+                                }
+                                
+                                // Boot the newly updated firmware based on target
+                                if unsafe { *(APP_ADDR as *const u32) != 0xFFFFFFFF } {
+                                    TX_BUFFER.get(|buf| {
+                                        queue_string(buf, "\r\nApplication update successful, booting...\r\n");
+                                    });
+                                    while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+                                        ensure_transmitting();
+                                    }
+                                    boot_application(&p, &mut cp);
+                                } else {
+                                    TX_BUFFER.get(|buf| {
+                                        queue_string(buf, "\r\nUpdater update successful, booting...\r\n");
+                                    });
+                                    while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+                                        ensure_transmitting();
+                                    }
+                                    boot_updater(&p, &mut cp);
+                                }
+                            },
+                            XmodemState::Error => {
+                                // Reset to menu
+                                set_state(XmodemState::Idle);
+                                update_option_selected = false;
+                                TX_BUFFER.get(|buf| {
+                                    queue_string(buf, "\r\nUpdate failed! Returning to menu.\r\n");
+                                    show_menu(buf);
+                                });
+                            },
+                            _ => {}
+                        }
+                    }
                 });
             });
-            
-            // Check if XMODEM has completed or errored
-            match get_state() {
-                XmodemState::Complete => {
-                    // Wait for last transmissions to complete
-                    while TX_IN_PROGRESS.load(Ordering::SeqCst) {
-                        ensure_transmitting();
-                    }
-                    
-                    // Boot the newly updated firmware
-                    let is_app_update = unsafe { *(APP_ADDR as *const u32) != 0xFFFFFFFF };
-                    if is_app_update {
-                        TX_BUFFER.get(|tx_buf| {
-                            queue_string(tx_buf, "\r\nApplication update successful, booting...\r\n");
-                        });
-                        while TX_IN_PROGRESS.load(Ordering::SeqCst) {
-                            ensure_transmitting();
-                        }
-                        boot_application(&p, &mut cp);
-                    } else {
-                        TX_BUFFER.get(|tx_buf| {
-                            queue_string(tx_buf, "\r\nUpdater update successful, booting...\r\n");
-                        });
-                        while TX_IN_PROGRESS.load(Ordering::SeqCst) {
-                            ensure_transmitting();
-                        }
-                        boot_updater(&p, &mut cp);
-                    }
-                },
-                XmodemState::Error => {
-                    // Reset to menu
-                    set_state(XmodemState::Idle);
-                    update_option_selected = false;
-                    TX_BUFFER.get(|tx_buf| {
-                        queue_string(tx_buf, "\r\nUpdate failed! Returning to menu.\r\n");
-                        show_menu(tx_buf);
-                    });
-                },
-                _ => {}
-            }
         }
         
         // Check if boot actions are requested
@@ -229,8 +236,10 @@ fn main() -> ! {
             }
         }
 
+        // Make sure UART transmission is continually processed
         ensure_transmitting();
 
+        // Power-saving wait for interrupt
         asm::wfi();
     }
 }
@@ -337,7 +346,7 @@ fn setup_usart(p: &Peripherals) {
         .div_fraction().bits(0x3)
     });
 
-    // enable error interrupts
+    // enable USART
     p.usart2.cr1().write(|w| {
         w.ue().enabled()
         .te().enabled()
