@@ -12,6 +12,8 @@ use crate::{
     ring_buffer::RingBuffer,
 };
 
+use core::sync::atomic::AtomicU32;
+
 // Constants for flash addresses (these should match your memory.x file)
 pub const UPDATER_ADDR: u32 = 0x08008000;
 pub const APP_ADDR: u32 = 0x08020000;
@@ -23,11 +25,33 @@ const XMODEM_STATE_RECEIVING: u8 = 2;
 const XMODEM_STATE_COMPLETE: u8 = 3;
 const XMODEM_STATE_ERROR: u8 = 4;
 
+// Error codes
+const ERROR_NONE: u8 = 0;
+const ERROR_INVALID_HEADER: u8 = 1;
+const ERROR_NOT_NEWER_VERSION: u8 = 2;
+const ERROR_FLASH_ERASE_FAILURE: u8 = 3;
+const ERROR_FLASH_WRITE_FAILURE: u8 = 4;
+
 // Global state variables
 static UPDATE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static UPDATE_TARGET_APP: AtomicBool = AtomicBool::new(false);
 static XMODEM_RECEIVE_STATE: AtomicU8 = AtomicU8::new(XMODEM_STATE_IDLE);
-static ERROR_MESSAGE: &str = "Unknown error";
+static CURRENT_ERROR: AtomicU8 = AtomicU8::new(ERROR_NONE);
+static LAST_C_SENT_TIME: AtomicU32 = AtomicU32::new(0);
+
+// Constants
+const C_SEND_INTERVAL_MS: u32 = 1000; // Интервал отправки символа 'C' в миллисекундах
+
+// Function to get error message from error code
+fn get_error_message(error_code: u8) -> &'static str {
+    match error_code {
+        ERROR_INVALID_HEADER => "Invalid image header",
+        ERROR_NOT_NEWER_VERSION => "New firmware is not newer than current version",
+        ERROR_FLASH_ERASE_FAILURE => "Failed to erase flash sector",
+        ERROR_FLASH_WRITE_FAILURE => "Failed to write to flash",
+        _ => "Unknown error",
+    }
+}
 
 // Function to queue a string to be transmitted
 pub fn queue_string(tx_buffer: &RingBuffer, s: &str) {
@@ -82,19 +106,35 @@ pub fn is_update_in_progress() -> bool {
     UPDATE_IN_PROGRESS.load(Ordering::SeqCst)
 }
 
+// Send 'C' character to request XMODEM-CRC transfer
+fn send_c_character(tx_buffer: &RingBuffer, current_ms: u32) {
+    let last_sent = LAST_C_SENT_TIME.load(Ordering::Relaxed);
+    
+    // Check if it's time to send another 'C'
+    if current_ms - last_sent >= C_SEND_INTERVAL_MS {
+        // Send 'C' character
+        tx_buffer.write(Control::Idle.into_u8());
+        
+        // Update the last sent time
+        LAST_C_SENT_TIME.store(current_ms, Ordering::Relaxed);
+    }
+}
+
 // Function to process XMODEM receive state machine
 pub fn process_xmodem_receive(p: &pac::Peripherals, tx_buffer: &RingBuffer, rx_buffer: &RingBuffer) -> bool {
     static mut RECEIVE_BUFFER: [u8; XmodemOneKPacket::LEN] = [0; XmodemOneKPacket::LEN];
     static mut CURRENT_ADDR: u32 = 0;
     static mut SEQUENCE: u8 = 1;
     static mut FIRST_PACKET: bool = true;
-    static mut TIMEOUT_COUNTER: u32 = 0;
+    static mut PACKET_RECEIVED: bool = false;
     
     let state = XMODEM_RECEIVE_STATE.load(Ordering::SeqCst);
     
     if state == XMODEM_STATE_IDLE {
         return false;
     }
+    
+    let current_ms = crate::systick::get_tick_ms();
     
     match state {
         XMODEM_STATE_INIT => {
@@ -108,10 +148,16 @@ pub fn process_xmodem_receive(p: &pac::Peripherals, tx_buffer: &RingBuffer, rx_b
                 };
                 SEQUENCE = 1;
                 FIRST_PACKET = true;
-                TIMEOUT_COUNTER = 0;
+                PACKET_RECEIVED = false;
             }
             
-            // Send 'C' character to initiate XMODEM-1K transfer
+            // Reset error code
+            CURRENT_ERROR.store(ERROR_NONE, Ordering::SeqCst);
+            
+            // Initialize the last C sent time
+            LAST_C_SENT_TIME.store(current_ms, Ordering::Relaxed);
+            
+            // Send first 'C' character to initiate XMODEM-1K transfer
             tx_buffer.write(Control::Idle.into_u8());
             
             // Move to receiving state
@@ -119,13 +165,9 @@ pub fn process_xmodem_receive(p: &pac::Peripherals, tx_buffer: &RingBuffer, rx_b
         },
         XMODEM_STATE_RECEIVING => {
             unsafe {
-                // Increment timeout counter
-                TIMEOUT_COUNTER += 1;
-                
-                // Resend 'C' every so often if no packet received
-                if FIRST_PACKET && TIMEOUT_COUNTER > 1000000 {
-                    tx_buffer.write(Control::Idle.into_u8());
-                    TIMEOUT_COUNTER = 0;
+                // If first packet hasn't been received yet, send 'C' periodically
+                if FIRST_PACKET && !PACKET_RECEIVED {
+                    send_c_character(tx_buffer, current_ms);
                 }
                 
                 // Check for EOT (End of Transmission)
@@ -151,7 +193,7 @@ pub fn process_xmodem_receive(p: &pac::Peripherals, tx_buffer: &RingBuffer, rx_b
                     }
                     
                     // Reset timeout counter since we received data
-                    TIMEOUT_COUNTER = 0;
+                    PACKET_RECEIVED = true;
                     
                     // Try to parse and validate the packet
                     match XmodemOneKPacket::try_from(&RECEIVE_BUFFER[..]) {
@@ -179,7 +221,7 @@ pub fn process_xmodem_receive(p: &pac::Peripherals, tx_buffer: &RingBuffer, rx_b
                                     // Invalid header
                                     tx_buffer.write(Control::Nak.into_u8());
                                     
-                                    ERROR_MESSAGE = "Invalid image header";
+                                    CURRENT_ERROR.store(ERROR_INVALID_HEADER, Ordering::SeqCst);
                                     XMODEM_RECEIVE_STATE.store(XMODEM_STATE_ERROR, Ordering::SeqCst);
                                     return true;
                                 }
@@ -196,7 +238,7 @@ pub fn process_xmodem_receive(p: &pac::Peripherals, tx_buffer: &RingBuffer, rx_b
                                         // Not newer version
                                         tx_buffer.write(Control::Nak.into_u8());
                                         
-                                        ERROR_MESSAGE = "New firmware is not newer than current version";
+                                        CURRENT_ERROR.store(ERROR_NOT_NEWER_VERSION, Ordering::SeqCst);
                                         XMODEM_RECEIVE_STATE.store(XMODEM_STATE_ERROR, Ordering::SeqCst);
                                         return true;
                                     }
@@ -206,7 +248,7 @@ pub fn process_xmodem_receive(p: &pac::Peripherals, tx_buffer: &RingBuffer, rx_b
                                 if flash::erase_sector(p, CURRENT_ADDR) == 0 {
                                     tx_buffer.write(Control::Nak.into_u8());
                                     
-                                    ERROR_MESSAGE = "Failed to erase flash sector";
+                                    CURRENT_ERROR.store(ERROR_FLASH_ERASE_FAILURE, Ordering::SeqCst);
                                     XMODEM_RECEIVE_STATE.store(XMODEM_STATE_ERROR, Ordering::SeqCst);
                                     return true;
                                 }
@@ -219,7 +261,7 @@ pub fn process_xmodem_receive(p: &pac::Peripherals, tx_buffer: &RingBuffer, rx_b
                             if flash::write(p, packet_data, CURRENT_ADDR) != 0 {
                                 tx_buffer.write(Control::Nak.into_u8());
                                 
-                                ERROR_MESSAGE = "Failed to write to flash";
+                                CURRENT_ERROR.store(ERROR_FLASH_WRITE_FAILURE, Ordering::SeqCst);
                                 XMODEM_RECEIVE_STATE.store(XMODEM_STATE_ERROR, Ordering::SeqCst);
                                 return true;
                             }
@@ -253,9 +295,13 @@ pub fn process_xmodem_receive(p: &pac::Peripherals, tx_buffer: &RingBuffer, rx_b
             return true;
         },
         XMODEM_STATE_ERROR => {
-            // Update failed
+            // Update failed - get the error message
+            let error_code = CURRENT_ERROR.load(Ordering::SeqCst);
+            let error_message = get_error_message(error_code);
+            
+            // Print the error message
             queue_string(tx_buffer, "\r\nFirmware update failed: ");
-            queue_string(tx_buffer, ERROR_MESSAGE);
+            queue_string(tx_buffer, error_message);
             queue_string(tx_buffer, "\r\n");
             
             // Reset flags and state

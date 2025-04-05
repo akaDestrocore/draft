@@ -70,6 +70,7 @@ pub static TX_BUFFER: Mutex<RingBuffer> = Mutex::new(RingBuffer::new());
 pub static RX_BUFFER: Mutex<RingBuffer> = Mutex::new(RingBuffer::new());
 static TX_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static LOAD_APPLICATION: AtomicBool = AtomicBool::new(false);
+static LOAD_UPDATER: AtomicBool = AtomicBool::new(false);
 static START_TIME: Mutex<u32> = Mutex::new(0);
 
 // handle like logic - using global pointers for peripherals
@@ -133,8 +134,6 @@ fn main() -> ! {
         );
     }
 
-    let mut rx_byte: u8 = 0;
-
     loop {
         // Process input and firmware updates
         process_input(&p);
@@ -149,21 +148,27 @@ fn main() -> ! {
         if LOAD_APPLICATION.load(Ordering::SeqCst) {
             boot_application(&p, &mut cp);
         }
+        
+        if LOAD_UPDATER.load(Ordering::SeqCst) {
+            boot_updater(&p, &mut cp);
+        }
 
-        // check timeout
-        let current_ms: u32 = systick::get_tick_ms();
-        let start_ms: u32 = START_TIME.get(|time: &mut u32| *time);
-        if (current_ms - start_ms) >= BOOT_TIMEOUT_MS {
-            TX_BUFFER.get(|buf| {
-                xmodem::queue_string(buf, "\r\nTimeout reached. Booting application...\r\n");
-            });
-            
-            // wait to finish
-            while TX_IN_PROGRESS.load(Ordering::SeqCst) {
-                ensure_transmitting();
+        // check timeout - only if no firmware update is in progress
+        if !xmodem::is_update_in_progress() {
+            let current_ms: u32 = systick::get_tick_ms();
+            let start_ms: u32 = START_TIME.get(|time: &mut u32| *time);
+            if (current_ms - start_ms) >= BOOT_TIMEOUT_MS {
+                TX_BUFFER.get(|buf| {
+                    xmodem::queue_string(buf, "\r\nTimeout reached. Booting application...\r\n");
+                });
+                
+                // wait to finish
+                while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+                    ensure_transmitting();
+                }
+                
+                boot_application(&p, &mut cp);
             }
-            
-            boot_application(&p, &mut cp);
         }
 
         ensure_transmitting();
@@ -341,18 +346,30 @@ fn process_input(p: &pac::Peripherals) {
 
         match byte {
             b'U' | b'u' => {
-                // Start firmware update
-                TX_BUFFER.get(|tx_buf| {
-                    xmodem::queue_string(tx_buf, "\r\nStarting firmware update...\r\n");
-                    xmodem::start_firmware_update(tx_buf);
-                });
+                // Boot to updater
+                let is_updater_valid: bool = unsafe { *(UPDATER_ADDR as *const u32) != 0xFFFFFFFF };
+                
+                if !is_updater_valid {
+                    TX_BUFFER.get(|tx_buf| {
+                        xmodem::queue_string(tx_buf, "\r\nValid updater not found!\r\n");
+                    });
+                } else {
+                    TX_BUFFER.get(|tx_buf| {
+                        xmodem::queue_string(tx_buf, "\r\nBooting updater...\r\n");
+                    });
+                    LOAD_UPDATER.store(true, Ordering::SeqCst);
+                    
+                    while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+                        ensure_transmitting();
+                    }
+                }
             },
             b'F' | b'f' => {
                 TX_BUFFER.get(|tx_buf| {
                     xmodem::queue_string(tx_buf, "\r\nEntering firmware update mode...\r\n");
                 });
                 
-                // Reset timeout when entering firmware update mode
+                // Reset timeout when entering firmware update mode - by setting a very long timeout
                 let current_ms: u32 = systick::get_tick_ms();
                 START_TIME.get(|time: &mut u32| *time = current_ms + BOOT_TIMEOUT_MS * 1000);
                 
@@ -542,6 +559,74 @@ fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
     }
 }
 
+fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
+    let mut is_updater_valid: bool = false;
+    let header_ptr: *const ImageHeader = UPDATER_ADDR as *const ImageHeader;
+    unsafe {  
+        // check if magic is correct
+        if (*header_ptr).image_magic == IMAGE_MAGIC_UPDATER {
+            is_updater_valid = true;
+        }
+    };
+
+    if !is_updater_valid {
+        TX_BUFFER.get(|tx_buf| {
+            xmodem::queue_string(tx_buf, "\r\nValid updater not found!\r\n");
+        });
+        
+        while TX_IN_PROGRESS.load(Ordering::SeqCst) {
+            ensure_transmitting();
+        }
+        
+        loop {
+            asm::nop();
+        }
+    }
+
+    let reset_addr: u32 = UPDATER_ADDR + IMAGE_HDR_SIZE + 4;
+    let stack_addr: u32 = unsafe {
+        *((UPDATER_ADDR + IMAGE_HDR_SIZE) as *const u32)
+    };
+    let reset_vector: u32 = unsafe {
+        *(reset_addr as *const u32)
+    };
+
+    rcc_deinit(p);
+    deinit(p);
+
+    // remap
+    p.rcc.apb2enr().modify(|_, w| w.syscfgen().set_bit());
+    p.syscfg.memrmp().write(|w| unsafe {
+        w.bits(0x01)
+    });
+
+    // disable SysTick
+    let mut cp: cortex_m::Peripherals = unsafe {
+        cortex_m::Peripherals::steal()
+    };
+    cp.SYST.disable_counter();
+    cp.SYST.disable_interrupt();
+
+    unsafe {
+        let scb: *const cortex_m::peripheral::scb::RegisterBlock = SCB::ptr();
+
+        let icsr: u32 = (*scb).icsr.read();
+        (*scb).icsr.write(icsr | (1 << 25));
+
+        (*scb).shcsr.modify(|v: u32| v & !(
+            (1 << 18) | (1 << 17) | (1 << 16)
+        ));
+
+        (*scb).vtor.write(UPDATER_ADDR + IMAGE_HDR_SIZE);
+
+        // set MSP
+        core::arch::asm!("MSR msp, {0}", in(reg) stack_addr);
+
+        let jump_fn: extern "C" fn() -> ! = core::mem::transmute(reset_vector);
+        jump_fn();
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn USART2() {
     USART2_PTR.get(|usart_opt: &mut Option<PeripheralPtr<stm32f4::usart1::RegisterBlock>>| {
@@ -581,14 +666,14 @@ fn SysTick() {
 }
 
 #[exception]
-unsafe fn HardFault(info: &cortex_m_rt::ExceptionFrame) -> ! {
+unsafe fn HardFault(_info: &cortex_m_rt::ExceptionFrame) -> ! {
     loop {
         asm::nop();
     }
 }
 
 #[exception]
-unsafe fn DefaultHandler(irqn: i16) {
+unsafe fn DefaultHandler(_irqn: i16) {
     loop {
         asm::nop();
     }
