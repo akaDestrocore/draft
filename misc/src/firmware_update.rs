@@ -8,7 +8,7 @@ use crate::{
     systick,
 };
 
-use rmodem::{Control, Sequence, XmodemData, XmodemPacket};
+use rmodem::{Control, Sequence, XmodemData, XmodemCrcPacket};
 
 // State machine states
 #[derive(Clone, Copy, PartialEq)]
@@ -184,7 +184,7 @@ fn process_byte(p: &pac::Peripherals, tx_buffer: &RingBuffer, byte: u8) -> bool 
             BUFFER_INDEX = 0; // Reset for next packet
             
             // Try to parse packet using rmodem
-            match rmodem::XmodemPacket::try_from(&PARTIAL_PACKET[..]) {
+            match rmodem::XmodemCrcPacket::try_from(&PARTIAL_PACKET[..]) {
                 Ok(packet) => {
                     // Verify sequence number
                     let expected_seq = SEQUENCE.load(Ordering::Relaxed);
