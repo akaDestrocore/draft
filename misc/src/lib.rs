@@ -13,7 +13,6 @@ pub use firmware_update::{
     process_xmodem, 
     start_update, 
     get_state, 
-    set_state, 
     is_update_in_progress, 
     queue_string,
     XmodemState
