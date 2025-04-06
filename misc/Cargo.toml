@@ -7,7 +7,6 @@ edition = "2021"
 cortex-m = { workspace = true, features = ["critical-section-single-core"] }
 cortex-m-rt = { workspace = true, features = ["device"] }
 stm32f4 = { workspace = true, features = ["rt"] }
-rmodem = { version = "0.1.1", default-features = false, features = ["crc"] }
 
 [features]
 default = []
