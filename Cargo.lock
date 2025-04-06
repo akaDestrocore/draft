@@ -111,7 +111,6 @@ version = "0.1.0"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
- "rmodem",
  "stm32f4",
 ]
 
@@ -153,12 +152,6 @@ checksum = "1885c039570dc00dcb4ff087a89e185fd56bae234ddc7f056a945bf36467248d"
 dependencies = [
  "proc-macro2",
 ]
-
-[[package]]
-name = "rmodem"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac7bc483ef9e688a398c75993ed9b4665f6c36be6ada5828b9e24efe7ce548bf"
 
 [[package]]
 name = "rustc_version"
