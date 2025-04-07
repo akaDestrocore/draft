@@ -49,12 +49,12 @@ fn main() -> ! {
     // Enable peripheral clocks
     enable_peripherals(&p);
 
+    // Setup GPIO pins
+    setup_gpio_pins(&p);
+
     // Setup SysTick
     systick::setup_systick(&mut cp.SYST);
     let start_time = systick::get_tick_ms();
-
-    // Setup GPIO pins
-    setup_gpio_pins(&p);
 
     // Initialize peripherals
     let mut leds = Leds::new(&p);
@@ -66,6 +66,8 @@ fn main() -> ! {
     
     // Blink all LEDs to indicate bootloader started
     leds.set_all(true);
+    systick::wait_ms(systick::get_tick_ms(), 500);
+    leds.set_all(false);
     
     uart.send_string("\r\n****************************************\r\n");
     uart.send_string("*            Bootloader v1.0.0           *\r\n");
@@ -84,16 +86,28 @@ fn main() -> ! {
     let mut boot_option = BootOption::None;
     let mut update_in_progress = false;
     let mut firmware_target = APP_ADDR;
+    let mut led_toggle_time = systick::get_tick_ms();
+    let mut packet_status_time = systick::get_tick_ms();
 
     loop {
-        // Toggle LED to show we're alive
-        leds.toggle(1);
-        
-        // Wait a bit
-        systick::wait_ms(systick::get_tick_ms(), 500);
-        
         // Process UART data
         uart.process();
+
+        // Visual indicators
+        let current_time = systick::get_tick_ms();
+        
+        // Toggle green LED to show system is alive
+        if current_time.wrapping_sub(led_toggle_time) >= 500 {
+            leds.toggle(0); // Toggle green LED
+            led_toggle_time = current_time;
+        }
+        
+        // Update packet count status periodically
+        if update_in_progress && current_time.wrapping_sub(packet_status_time) >= 2000 {
+            // Send current packet count every 2 seconds
+            let count_str = itoa(xmodem.get_packet_count() as u32);
+            packet_status_time = current_time;
+        }
 
         // Handle user input if not in update mode
         if !update_in_progress {
@@ -119,11 +133,17 @@ fn main() -> ! {
                         if boot_option == BootOption::SelectUpdateTarget {
                             // Start application update
                             uart.send_string("\r\nUpdating application...\r\n");
-                            uart.send_string("Send file using XMODEM protocol\r\n");
+                            uart.send_string("Send file using XMODEM protocol (standard mode, not CRC)\r\n");
                             firmware_target = APP_ADDR;
                             xmodem.start(firmware_target);
                             update_in_progress = true;
                             boot_option = BootOption::None;
+                            
+                            // Set LEDs for XMODEM mode
+                            leds.set(0, true);  // Green - system alive
+                            leds.set(1, true);  // Orange - XMODEM active
+                            leds.set(2, false); // Red - no error
+                            leds.set(3, false); // Blue - no data received yet
                         } else {
                             // Directly boot application
                             if bootloader::is_firmware_valid(APP_ADDR) {
@@ -139,16 +159,18 @@ fn main() -> ! {
                         uart.send_string("\r\n--- System Diagnostics ---\r\n");
                         let state_str = match xmodem.get_state() {
                             XmodemState::Idle => "Idle",
-                            XmodemState::WaitSOH => "WaitSOH",
-                            XmodemState::WaitIndex1 => "WaitIndex1",
-                            XmodemState::WaitIndex2 => "WaitIndex2",
-                            XmodemState::ReceiveData => "ReceiveData",
-                            XmodemState::CheckCrc => "CheckCrc",
-                            XmodemState::FinishTransfer => "FinishTransfer",
+                            XmodemState::WaitingForData => "WaitingForData",
+                            XmodemState::ReceivingData => "ReceivingData",
                             XmodemState::Error => "Error",
+                            XmodemState::Complete => "Complete",
                         };
                         uart.send_string("XMODEM state: ");
                         uart.send_string(state_str);
+                        uart.send_string("\r\n");
+                        
+                        uart.send_string("XMODEM packets received: ");
+                        let count_str = itoa(xmodem.get_packet_count() as u32);
+                        uart.send_string(count_str);
                         uart.send_string("\r\n");
                         
                         uart.send_string("App valid: ");
@@ -174,11 +196,17 @@ fn main() -> ! {
                                 if byte == b'U' || byte == b'u' {
                                     // Update updater firmware
                                     uart.send_string("\r\nUpdating updater...\r\n");
-                                    uart.send_string("Send file using XMODEM protocol\r\n");
+                                    uart.send_string("Send file using XMODEM protocol (standard mode, not CRC)\r\n");
                                     firmware_target = UPDATER_ADDR;
                                     xmodem.start(firmware_target);
                                     update_in_progress = true;
                                     boot_option = BootOption::None;
+                                    
+                                    // Set LEDs for XMODEM mode
+                                    leds.set(0, true);  // Green - system alive
+                                    leds.set(1, true);  // Orange - XMODEM active
+                                    leds.set(2, false); // Red - no error
+                                    leds.set(3, false); // Blue - no data received yet
                                 } else {
                                     uart.send_string("\r\nInvalid option, cancelled.\r\n");
                                     boot_option = BootOption::None;
@@ -193,6 +221,9 @@ fn main() -> ! {
         } else {
             // Handle XMODEM update
             if let Some(byte) = uart.read_byte() {
+                // Toggle blue LED to show data received
+                leds.set(3, !leds.get(3));
+                
                 match xmodem.process_byte(byte) {
                     Ok(true) => {
                         // Need to send a response
@@ -206,14 +237,25 @@ fn main() -> ! {
                     Err(XmodemError::TransferComplete) => {
                         uart.send_string("\r\nTransfer complete! Firmware updated successfully.\r\n");
                         update_in_progress = false;
+                        
+                        // All LEDs on to indicate success
+                        leds.set_all(true);
+                        systick::wait_ms(systick::get_tick_ms(), 500);
+                        leds.set_all(false);
                     },
                     Err(XmodemError::Cancelled) => {
                         uart.send_string("\r\nTransfer cancelled.\r\n");
                         update_in_progress = false;
+                        
+                        // Red LED on to indicate cancellation
+                        leds.set(2, true);
                     },
                     Err(XmodemError::Timeout) => {
                         uart.send_string("\r\nTransfer timed out.\r\n");
                         update_in_progress = false;
+                        
+                        // Red LED on to indicate timeout
+                        leds.set(2, true);
                     },
                     Err(XmodemError::InvalidPacket) => {
                         // XMODEM will handle retries, we just send responses
@@ -224,14 +266,19 @@ fn main() -> ! {
                     Err(XmodemError::FlashWriteError) => {
                         uart.send_string("\r\nError writing to flash memory.\r\n");
                         update_in_progress = false;
+                        
+                        // Red LED on to indicate flash error
+                        leds.set(2, true);
                     },
                 }
             }
             
-            // Send periodic 'C' during startup phase
-            if xmodem.get_state() == XmodemState::WaitSOH {
+            // Send periodic NAK or 'C' during waiting phase
+            if xmodem.get_state() == XmodemState::WaitingForData {
                 if xmodem.should_send_c() {
-                    uart.send_byte(b'C');
+                    if let Some(response) = xmodem.get_response() {
+                        uart.send_byte(response);
+                    }
                 }
             }
             
@@ -239,6 +286,9 @@ fn main() -> ! {
             if xmodem.get_state() == XmodemState::Error {
                 uart.send_string("\r\nXMODEM transfer error. Aborting.\r\n");
                 update_in_progress = false;
+                
+                // Red LED on to indicate error
+                leds.set(2, true);
             }
         }
 
@@ -277,14 +327,46 @@ fn main() -> ! {
                 } else {
                     uart.send_string("\r\nAuto-boot timeout reached but no valid application found.\r\n");
                     uart.send_string("Please flash a valid application image.\r\n");
-                    // Reset the timeout
-                    //start_time = systick::get_tick_ms();
+                    
+                    // Reset the timeout to avoid repeating this message
+                    let start_time = current_time;
                 }
             }
         }
+    }
+}
 
-        // Wait for interrupt (power saving)
-        //asm::wfi();
+/// Simple integer to string conversion for debugging
+fn itoa(mut value: u32) -> &'static str {
+    static mut BUFFER: [u8; 16] = [0; 16];
+    
+    if value == 0 {
+        return "0";
+    }
+    
+    let mut i = 0;
+    unsafe {
+        while value > 0 && i < BUFFER.len() {
+            BUFFER[i] = b'0' + (value % 10) as u8;
+            value /= 10;
+            i += 1;
+        }
+        
+        // Reverse the digits
+        let mut j = 0;
+        let mut k = i - 1;
+        while j < k {
+            let temp = BUFFER[j];
+            BUFFER[j] = BUFFER[k];
+            BUFFER[k] = temp;
+            j += 1;
+            k -= 1;
+        }
+        
+        BUFFER[i] = 0;
+        
+        // Convert to string slice - safe because we null-terminated
+        core::str::from_utf8_unchecked(&BUFFER[0..i])
     }
 }
 

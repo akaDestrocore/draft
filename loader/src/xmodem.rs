@@ -1,352 +1,497 @@
-use misc::{flash, systick};
+#![no_std]
+#![no_main]
+
+mod bootloader;
+mod xmodem;
+mod uart;
+mod led;
+
+use bootloader::{BootOption, boot_application, boot_updater};
+use core::panic::PanicInfo;
+use cortex_m::{asm, peripheral::SYST};
+use cortex_m_rt::{entry, exception};
+use led::Leds;
+use misc::{
+    image::{ImageHeader, SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER},
+    systick,
+};
 use stm32f4 as pac;
+use stm32f4::Peripherals;
+use uart::{UartManager, UartError};
+use xmodem::{XmodemManager, XmodemError, XmodemState};
 
-// XMODEM protocol constants
-pub const SOH: u8 = 0x01;  // Start of header (128 bytes)
-pub const STX: u8 = 0x02;  // Start of header (1K bytes)
-pub const EOT: u8 = 0x04;  // End of transmission
-pub const ACK: u8 = 0x06;  // Acknowledge
-pub const NAK: u8 = 0x15;  // Negative acknowledge
-pub const CAN: u8 = 0x18;  // Cancel (24)
-pub const C: u8 = 0x43;    // ASCII 'C' for CRC mode
+// Flash memory addresses
+pub const UPDATER_ADDR: u32 = 0x08008000;
+pub const APP_ADDR: u32 = 0x08020000;
+pub const IMAGE_HDR_SIZE: u32 = 0x200;
+pub const BOOT_TIMEOUT_MS: u32 = 10_000; // 10 seconds
 
-// Максимальное количество попыток для пакета
-const MAX_RETRIES: u8 = 10;
-// Интервал отправки символа 'C' для инициации передачи (мс)
-const C_INTERVAL_MS: u32 = 1000;
+#[no_mangle]
+#[link_section = ".shared_memory"]
+pub static mut SHARED_MEMORY: SharedMemory = SharedMemory::new();
 
-// XMODEM state machine
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum XmodemState {
-    Idle,           // Не принимаем данные
-    WaitSOH,        // Ожидаем начала пакета (SOH/STX)
-    WaitIndex1,     // Ожидаем номер пакета
-    WaitIndex2,     // Ожидаем комплементарный номер пакета
-    ReceiveData,    // Получение данных
-    CheckCrc,       // Проверка CRC
-    FinishTransfer, // Завершение передачи
-    Error,          // Состояние ошибки
-}
+#[no_mangle]
+#[link_section = ".image_hdr"]
+pub static IMAGE_HEADER: ImageHeader = ImageHeader::new(
+    IMAGE_TYPE_LOADER,
+    IMAGE_MAGIC_LOADER,
+    1, 0, 0  // ver 1.0.0
+);
 
-#[derive(Debug)]
-pub enum XmodemError {
-    InvalidPacket,
-    Cancelled,
-    Timeout,
-    TransferComplete,
-    FlashWriteError,
-}
+#[entry]
+fn main() -> ! {
+    let p = pac::Peripherals::take().unwrap();
+    let mut cp = cortex_m::Peripherals::take().unwrap();
 
-/// Функция для вычисления CRC-16 CCITT для данных XMODEM
-fn calculate_crc16(data: &[u8]) -> u16 {
-    let mut crc: u16 = 0;
+    // Setup system clock to 90MHz
+    setup_system_clock(&p);
+
+    // Enable peripheral clocks
+    enable_peripherals(&p);
+
+    // Setup GPIO pins
+    setup_gpio_pins(&p);
+
+    // Setup SysTick
+    systick::setup_systick(&mut cp.SYST);
+    let start_time = systick::get_tick_ms();
+
+    // Initialize peripherals
+    let mut leds = Leds::new(&p);
+    let mut uart = UartManager::new(&p);
+    let mut xmodem = XmodemManager::new();
+
+    leds.init();
+    uart.init();
     
-    for &byte in data {
-        crc ^= (byte as u16) << 8;
-        
-        for _ in 0..8 {
-            if (crc & 0x8000) != 0 {
-                crc = (crc << 1) ^ 0x1021;
-            } else {
-                crc <<= 1;
-            }
-        }
-    }
+    // Blink all LEDs to indicate bootloader started
+    leds.set_all(true);
+    systick::wait_ms(systick::get_tick_ms(), 500);
+    leds.set_all(false);
     
-    crc
-}
+    uart.send_string("\r\n****************************************\r\n");
+    uart.send_string("*            Bootloader v1.0.0           *\r\n");
+    uart.send_string("****************************************\r\n\r\n");
+    uart.send_string("Press 'U' to enter updater\r\n");
+    uart.send_string("Press 'F' to update firmware using XMODEM\r\n");
+    uart.send_string("Press 'A' to boot application\r\n");
+    uart.send_string("Press 'Enter' to boot application\r\n");
+    uart.send_string("Will boot automatically in 10 seconds...\r\n");
 
-pub struct XmodemManager {
-    state: XmodemState,           // Текущее состояние
-    target_address: u32,          // Целевой адрес для прошивки
-    current_address: u32,         // Текущий адрес для записи
-    buffer: [u8; 133],            // Буфер для пакета (128 данных + 5 служебных байтов)
-    buffer_index: usize,          // Индекс в буфере
-    data_size: usize,             // Размер данных в пакете (128 или 1024)
-    packet_number: u8,            // Ожидаемый номер пакета
-    prev_packet_number: u8,       // Предыдущий номер пакета
-    last_c_time: u32,             // Время последней отправки 'C'
-    response: Option<u8>,         // Байт для отправки
-    retries: u8,                  // Счетчик попыток
-    first_packet: bool,           // Флаг первого пакета
-    last_sector_erased: u32,      // Последний стертый сектор
-}
-
-impl XmodemManager {
-    pub fn new() -> Self {
-        Self {
-            state: XmodemState::Idle,
-            target_address: 0,
-            current_address: 0,
-            buffer: [0; 133],
-            buffer_index: 0,
-            data_size: 128,        // По умолчанию 128 байт
-            packet_number: 1,      // Начальный номер пакета
-            prev_packet_number: 0, // Предыдущий номер пакета
-            last_c_time: 0,
-            response: None,
-            retries: 0,
-            first_packet: true,
-            last_sector_erased: 0,
-        }
+    // Enable USART2 interrupt in NVIC
+    unsafe {
+        cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USART2);
     }
 
-    /// Инициализация приема по XMODEM
-    pub fn start(&mut self, address: u32) {
-        self.state = XmodemState::WaitSOH;
-        self.target_address = address;
-        self.current_address = address;
-        self.buffer_index = 0;
-        self.packet_number = 1;
-        self.prev_packet_number = 0;
-        self.last_c_time = systick::get_tick_ms();
-        self.response = Some(C);  // Отправить начальный 'C'
-        self.retries = 0;
-        self.first_packet = true;
+    let mut boot_option = BootOption::None;
+    let mut update_in_progress = false;
+    let mut firmware_target = APP_ADDR;
+    let mut led_toggle_time = systick::get_tick_ms();
+    let mut packet_status_time = systick::get_tick_ms();
+
+    loop {
+        // Process UART data
+        uart.process();
+
+        // Visual indicators
+        let current_time = systick::get_tick_ms();
         
-        // Стираем первый сектор перед началом приема
-        let result = unsafe { 
-            flash::erase_sector(&pac::Peripherals::steal(), address) 
-        };
+        // Toggle green LED to show system is alive
+        if current_time.wrapping_sub(led_toggle_time) >= 500 {
+            leds.toggle(0); // Toggle green LED
+            led_toggle_time = current_time;
+        }
         
-        if result > 0 {
-            self.last_sector_erased = address;
-        } else {
-            self.state = XmodemState::Error;
+        // Update packet count status periodically
+        if update_in_progress && current_time.wrapping_sub(packet_status_time) >= 2000 {
+            // Send current packet count every 2 seconds
+            uart.send_string("\r\nXMODEM packets received: ");
+            let count_str = itoa(xmodem.get_packet_count() as u32);
+            uart.send_string(count_str);
+            uart.send_string("\r\n");
+            packet_status_time = current_time;
         }
-    }
 
-    /// Получить текущее состояние
-    pub fn get_state(&self) -> XmodemState {
-        self.state
-    }
-
-    /// Проверка необходимости отправки 'C' для инициации передачи
-    pub fn should_send_c(&mut self) -> bool {
-        if self.state == XmodemState::WaitSOH {
-            let current_time = systick::get_tick_ms();
-            if current_time.wrapping_sub(self.last_c_time) >= C_INTERVAL_MS {
-                self.last_c_time = current_time;
-                self.response = Some(C);
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Получить байт для отправки
-    pub fn get_response(&mut self) -> Option<u8> {
-        let resp = self.response;
-        self.response = None;
-        resp
-    }
-
-    /// Обработка принятого байта
-    pub fn process_byte(&mut self, byte: u8) -> Result<bool, XmodemError> {
-        match self.state {
-            XmodemState::Idle => {
-                // Не выполняем прием
-                Ok(false)
-            },
-            
-            XmodemState::WaitSOH => {
+        // Handle user input if not in update mode
+        if !update_in_progress {
+            if let Some(byte) = uart.read_byte() {
                 match byte {
-                    SOH => {
-                        // Начало пакета 128 байт
-                        self.buffer[0] = byte;
-                        self.buffer_index = 1;
-                        self.data_size = 128;
-                        self.state = XmodemState::WaitIndex1;
-                        Ok(false)  // Еще не готовы отправить ответ
+                    b'U' | b'u' => {
+                        // Boot updater
+                        if bootloader::is_firmware_valid(UPDATER_ADDR) {
+                            uart.send_string("\r\nBooting updater...\r\n");
+                            boot_option = BootOption::Updater;
+                        } else {
+                            uart.send_string("\r\nValid updater not found!\r\n");
+                        }
                     },
-                    STX => {
-                        // Начало пакета 1024 байт
-                        self.buffer[0] = byte;
-                        self.buffer_index = 1;
-                        self.data_size = 1024;
-                        self.state = XmodemState::WaitIndex1;
-                        Ok(false)
+                    b'F' | b'f' => {
+                        // Start firmware update
+                        uart.send_string("\r\nUpdate firmware using XMODEM - select target:\r\n");
+                        uart.send_string("'A' - Application\r\n");
+                        uart.send_string("'U' - Updater\r\n");
+                        boot_option = BootOption::SelectUpdateTarget;
                     },
-                    EOT => {
-                        // Конец передачи
-                        self.response = Some(ACK);
-                        self.state = XmodemState::Idle;
-                        Err(XmodemError::TransferComplete)
+                    b'A' | b'a' => {
+                        if boot_option == BootOption::SelectUpdateTarget {
+                            // Start application update
+                            uart.send_string("\r\nUpdating application...\r\n");
+                            uart.send_string("Send file using XMODEM protocol (standard mode, not CRC)\r\n");
+                            firmware_target = APP_ADDR;
+                            xmodem.start(firmware_target);
+                            update_in_progress = true;
+                            boot_option = BootOption::None;
+                            
+                            // Set LEDs for XMODEM mode
+                            leds.set(0, true);  // Green - system alive
+                            leds.set(1, true);  // Orange - XMODEM active
+                            leds.set(2, false); // Red - no error
+                            leds.set(3, false); // Blue - no data received yet
+                        } else {
+                            // Directly boot application
+                            if bootloader::is_firmware_valid(APP_ADDR) {
+                                uart.send_string("\r\nBooting application...\r\n");
+                                boot_option = BootOption::Application;
+                            } else {
+                                uart.send_string("\r\nValid application not found!\r\n");
+                            }
+                        }
                     },
-                    CAN => {
-                        // Передача отменена
-                        self.state = XmodemState::Idle;
-                        Err(XmodemError::Cancelled)
+                    b'D' | b'd' => {
+                        // Debug info
+                        uart.send_string("\r\n--- System Diagnostics ---\r\n");
+                        let state_str = match xmodem.get_state() {
+                            XmodemState::Idle => "Idle",
+                            XmodemState::WaitingForData => "WaitingForData",
+                            XmodemState::ReceivingData => "ReceivingData",
+                            XmodemState::Error => "Error",
+                            XmodemState::Complete => "Complete",
+                        };
+                        uart.send_string("XMODEM state: ");
+                        uart.send_string(state_str);
+                        uart.send_string("\r\n");
+                        
+                        uart.send_string("XMODEM packets received: ");
+                        let count_str = itoa(xmodem.get_packet_count() as u32);
+                        uart.send_string(count_str);
+                        uart.send_string("\r\n");
+                        
+                        uart.send_string("App valid: ");
+                        uart.send_string(if bootloader::is_firmware_valid(APP_ADDR) { "Yes" } else { "No" });
+                        uart.send_string("\r\n");
+                        
+                        uart.send_string("Updater valid: ");
+                        uart.send_string(if bootloader::is_firmware_valid(UPDATER_ADDR) { "Yes" } else { "No" });
+                        uart.send_string("\r\n");
+                    },
+                    b'\r' | b'\n' => {
+                        // Boot application
+                        if bootloader::is_firmware_valid(APP_ADDR) {
+                            uart.send_string("\r\nBooting application...\r\n");
+                            boot_option = BootOption::Application;
+                        } else {
+                            uart.send_string("\r\nValid application not found!\r\n");
+                        }
                     },
                     _ => {
-                        // Игнорируем другие байты
-                        Ok(false)
-                    }
-                }
-            },
-            
-            XmodemState::WaitIndex1 => {
-                // Получен номер пакета
-                self.buffer[1] = byte;
-                self.buffer_index = 2;
-                self.state = XmodemState::WaitIndex2;
-                Ok(false)
-            },
-            
-            XmodemState::WaitIndex2 => {
-                // Получен комплементарный номер пакета
-                self.buffer[2] = byte;
-                self.buffer_index = 3;
-                
-                // Проверяем, что номер пакета и его комплемент корректны
-                if self.buffer[1] + self.buffer[2] != 255 {
-                    // Ошибка в номере пакета
-                    self.response = Some(NAK);
-                    self.state = XmodemState::WaitSOH;
-                    self.retries += 1;
-                    
-                    if self.retries > MAX_RETRIES {
-                        self.state = XmodemState::Error;
-                        return Err(XmodemError::InvalidPacket);
-                    }
-                    
-                    return Ok(true);
-                }
-                
-                // Проверяем номер пакета
-                if self.first_packet {
-                    // Для первого пакета принимаем любой номер (в пределах разумного)
-                    self.packet_number = self.buffer[1];
-                    self.first_packet = false;
-                } else if self.buffer[1] != self.packet_number {
-                    // Несоответствие номера пакета ожидаемому
-                    // Если это повторный пакет, принимаем его
-                    if self.buffer[1] == self.prev_packet_number {
-                        // Это повторный пакет, который мы уже получили, просто подтверждаем
-                        self.response = Some(ACK);
-                        self.state = XmodemState::WaitSOH;
-                        return Ok(true);
-                    } else {
-                        // Неправильный номер пакета
-                        self.response = Some(NAK);
-                        self.state = XmodemState::WaitSOH;
-                        self.retries += 1;
-                        
-                        if self.retries > MAX_RETRIES {
-                            self.state = XmodemState::Error;
-                            return Err(XmodemError::InvalidPacket);
+                        if byte != 0 {
+                            if boot_option == BootOption::SelectUpdateTarget {
+                                if byte == b'U' || byte == b'u' {
+                                    // Update updater firmware
+                                    uart.send_string("\r\nUpdating updater...\r\n");
+                                    uart.send_string("Send file using XMODEM protocol (standard mode, not CRC)\r\n");
+                                    firmware_target = UPDATER_ADDR;
+                                    xmodem.start(firmware_target);
+                                    update_in_progress = true;
+                                    boot_option = BootOption::None;
+                                    
+                                    // Set LEDs for XMODEM mode
+                                    leds.set(0, true);  // Green - system alive
+                                    leds.set(1, true);  // Orange - XMODEM active
+                                    leds.set(2, false); // Red - no error
+                                    leds.set(3, false); // Blue - no data received yet
+                                } else {
+                                    uart.send_string("\r\nInvalid option, cancelled.\r\n");
+                                    boot_option = BootOption::None;
+                                }
+                            } else {
+                                uart.send_string("\r\nInvalid option, try again.\r\n");
+                            }
                         }
+                    },
+                }
+            }
+        } else {
+            // Handle XMODEM update
+            if let Some(byte) = uart.read_byte() {
+                // Toggle blue LED to show data received
+                leds.set(3, !leds.get(3));
+                
+                match xmodem.process_byte(byte) {
+                    Ok(true) => {
+                        // Need to send a response
+                        if let Some(response) = xmodem.get_response() {
+                            uart.send_byte(response);
+                        }
+                    },
+                    Ok(false) => {
+                        // No response needed
+                    },
+                    Err(XmodemError::TransferComplete) => {
+                        uart.send_string("\r\nTransfer complete! Firmware updated successfully.\r\n");
+                        update_in_progress = false;
                         
-                        return Ok(true);
+                        // All LEDs on to indicate success
+                        leds.set_all(true);
+                        systick::wait_ms(systick::get_tick_ms(), 500);
+                        leds.set_all(false);
+                    },
+                    Err(XmodemError::Cancelled) => {
+                        uart.send_string("\r\nTransfer cancelled.\r\n");
+                        update_in_progress = false;
+                        
+                        // Red LED on to indicate cancellation
+                        leds.set(2, true);
+                    },
+                    Err(XmodemError::Timeout) => {
+                        uart.send_string("\r\nTransfer timed out.\r\n");
+                        update_in_progress = false;
+                        
+                        // Red LED on to indicate timeout
+                        leds.set(2, true);
+                    },
+                    Err(XmodemError::InvalidPacket) => {
+                        // XMODEM will handle retries, we just send responses
+                        if let Some(response) = xmodem.get_response() {
+                            uart.send_byte(response);
+                        }
+                    },
+                    Err(XmodemError::FlashWriteError) => {
+                        uart.send_string("\r\nError writing to flash memory.\r\n");
+                        update_in_progress = false;
+                        
+                        // Red LED on to indicate flash error
+                        leds.set(2, true);
+                    },
+                    Err(XmodemError::InvalidMagic) => {
+                        uart.send_string("\r\nInvalid firmware magic number! Wrong firmware type.\r\n");
+                        update_in_progress = false;
+                        
+                        // Red LED on to indicate validation error
+                        leds.set(2, true);
+                    },
+                    Err(XmodemError::OlderVersion) => {
+                        uart.send_string("\r\nFirmware version is older than currently installed.\r\n");
+                        update_in_progress = false;
+                        
+                        // Red LED on to indicate validation error
+                        leds.set(2, true);
+                    },
+                }
+            }
+            
+            // Send periodic NAK or 'C' during waiting phase
+            if xmodem.get_state() == XmodemState::WaitingForData {
+                if xmodem.should_send_c() {
+                    if let Some(response) = xmodem.get_response() {
+                        uart.send_byte(response);
                     }
                 }
+            }
+            
+            // Check if XMODEM is in an error state
+            if xmodem.get_state() == XmodemState::Error {
+                uart.send_string("\r\nXMODEM transfer error. Aborting.\r\n");
+                update_in_progress = false;
                 
-                // Номер пакета корректный, переходим к приему данных
-                self.state = XmodemState::ReceiveData;
-                Ok(false)
-            },
-            
-            XmodemState::ReceiveData => {
-                // Получение данных пакета
-                self.buffer[self.buffer_index] = byte;
-                self.buffer_index += 1;
-                
-                // Проверяем, получили ли все данные и CRC
-                if self.buffer_index == 3 + self.data_size + 2 {
-                    // Получен весь пакет (SOH + номер пакета + комплемент + данные + CRC)
-                    self.state = XmodemState::CheckCrc;
-                    
-                    // Проверяем CRC
-                    let crc_received = ((self.buffer[3 + self.data_size] as u16) << 8) | 
-                                       (self.buffer[3 + self.data_size + 1] as u16);
-                    
-                    let crc_calculated = calculate_crc16(&self.buffer[3..3 + self.data_size]);
-                    
-                    if crc_received != crc_calculated {
-                        // Ошибка CRC
-                        self.response = Some(NAK);
-                        self.state = XmodemState::WaitSOH;
-                        self.retries += 1;
-                        
-                        if self.retries > MAX_RETRIES {
-                            self.state = XmodemState::Error;
-                            return Err(XmodemError::InvalidPacket);
-                        }
-                        
-                        return Ok(true);
-                    }
-                    
-                    // Проверяем, нужно ли стереть следующий сектор
-                    let next_address = self.current_address + self.data_size as u32;
-                    let current_sector = self.current_address & 0xFFFF0000;
-                    let next_sector = next_address & 0xFFFF0000;
-                    
-                    if current_sector != next_sector && next_sector != self.last_sector_erased {
-                        // Нужно стереть новый сектор
-                        let result = unsafe { 
-                            flash::erase_sector(&pac::Peripherals::steal(), next_sector) 
-                        };
-                        
-                        if result == 0 {
-                            // Ошибка стирания
-                            self.state = XmodemState::Error;
-                            return Err(XmodemError::FlashWriteError);
-                        }
-                        
-                        self.last_sector_erased = next_sector;
-                    }
-                    
-                    // Записываем данные во flash
-                    let result = unsafe { 
-                        flash::write(&pac::Peripherals::steal(), 
-                                    &self.buffer[3..3 + self.data_size], 
-                                    self.current_address)
-                    };
-                    
-                    if result != 0 {
-                        // Ошибка записи
-                        self.state = XmodemState::Error;
-                        return Err(XmodemError::FlashWriteError);
-                    }
-                    
-                    // Сохраняем предыдущий номер пакета
-                    self.prev_packet_number = self.packet_number;
-                    
-                    // Увеличиваем адрес и номер пакета
-                    self.current_address += self.data_size as u32;
-                    self.packet_number = self.packet_number.wrapping_add(1);
-                    
-                    // Успешно приняли и записали пакет
-                    self.response = Some(ACK);
-                    self.state = XmodemState::WaitSOH;
-                    self.buffer_index = 0;
-                    self.retries = 0;
-                    
-                    return Ok(true);
-                }
-                
-                Ok(false)
-            },
-            
-            XmodemState::CheckCrc => {
-                // Это состояние не используется в такой реализации
-                // (CRC проверяется в ReceiveData)
-                self.state = XmodemState::WaitSOH;
-                Ok(false)
-            },
-            
-            XmodemState::FinishTransfer => {
-                // Завершение передачи
-                self.state = XmodemState::Idle;
-                self.response = Some(ACK);
-                Err(XmodemError::TransferComplete)
-            },
-            
-            XmodemState::Error => {
-                // Состояние ошибки
-                self.state = XmodemState::Idle;
-                Ok(false)
+                // Red LED on to indicate error
+                leds.set(2, true);
             }
         }
+
+        // Handle boot options
+        match boot_option {
+            BootOption::Application => {
+                // Wait for UART to finish sending
+                while !uart.is_tx_complete() {
+                    uart.process();
+                }
+                boot_application(&p, &mut cp);
+            },
+            BootOption::Updater => {
+                // Wait for UART to finish sending
+                while !uart.is_tx_complete() {
+                    uart.process();
+                }
+                boot_updater(&p, &mut cp);
+            },
+            _ => {}
+        }
+
+        // Check for auto-boot timeout (only if not updating and no option selected)
+        if !update_in_progress && boot_option == BootOption::None {
+            let current_time = systick::get_tick_ms();
+            if current_time.wrapping_sub(start_time) >= BOOT_TIMEOUT_MS {
+                if bootloader::is_firmware_valid(APP_ADDR) {
+                    uart.send_string("\r\nAuto-boot timeout reached. Booting application...\r\n");
+                    
+                    // Wait for UART to finish sending
+                    while !uart.is_tx_complete() {
+                        uart.process();
+                    }
+                    
+                    boot_application(&p, &mut cp);
+                } else {
+                    uart.send_string("\r\nAuto-boot timeout reached but no valid application found.\r\n");
+                    uart.send_string("Please flash a valid application image.\r\n");
+                    
+                    // Reset the timeout to avoid repeating this message
+                    let start_time = current_time;
+                }
+            }
+        }
+    }
+}
+
+/// Simple integer to string conversion for debugging
+fn itoa(mut value: u32) -> &'static str {
+    static mut BUFFER: [u8; 16] = [0; 16];
+    
+    if value == 0 {
+        return "0";
+    }
+    
+    let mut i = 0;
+    unsafe {
+        while value > 0 && i < BUFFER.len() {
+            BUFFER[i] = b'0' + (value % 10) as u8;
+            value /= 10;
+            i += 1;
+        }
+        
+        // Reverse the digits
+        let mut j = 0;
+        let mut k = i - 1;
+        while j < k {
+            let temp = BUFFER[j];
+            BUFFER[j] = BUFFER[k];
+            BUFFER[k] = temp;
+            j += 1;
+            k -= 1;
+        }
+        
+        BUFFER[i] = 0;
+        
+        // Convert to string slice - safe because we null-terminated
+        core::str::from_utf8_unchecked(&BUFFER[0..i])
+    }
+}
+
+/// Enable peripheral clocks
+fn enable_peripherals(p: &Peripherals) {
+    // Enable GPIO clocks
+    p.rcc.ahb1enr().modify(|_, w| {
+        w.gpioaen().enabled()  // For USART2 pins
+         .gpioden().enabled()  // For LEDs
+    });
+    
+    // Enable USART2 clock
+    p.rcc.apb1enr().modify(|_, w| {
+        w.usart2en().enabled()
+    });
+    
+    // Enable SYSCFG clock (needed for bootloader)
+    p.rcc.apb2enr().modify(|_, w| {
+        w.syscfgen().enabled()
+    });
+}
+
+/// Setup GPIO pins for UART and LEDs
+fn setup_gpio_pins(p: &Peripherals) {
+    // Configure GPIOA for USART2 (PA2 = TX, PA3 = RX)
+    p.gpioa.moder().modify(|_, w| {
+        w.moder2().alternate()  // TX pin
+         .moder3().alternate()  // RX pin
+    });
+    
+    // Set alternate function 7 (USART2) for PA2 and PA3
+    p.gpioa.afrl().modify(|_, w| {
+        w.afrl2().af7()  // TX pin
+         .afrl3().af7()  // RX pin
+    });
+    
+    // Set high speed mode
+    p.gpioa.ospeedr().modify(|_, w| {
+        w.ospeedr2().high_speed()
+         .ospeedr3().high_speed()
+    });
+    
+    // No pull-up/pull-down
+    p.gpioa.pupdr().modify(|_, w| {
+        w.pupdr2().floating()
+         .pupdr3().floating()
+    });
+}
+
+fn setup_system_clock(p: &pac::Peripherals) {
+    // Enable PWR clock
+    p.rcc.apb1enr().modify(|_, w| w.pwren().set_bit());
+
+    // Set voltage scale
+    p.pwr.cr().modify(|_, w| w.vos().scale1());
+
+    // Configure flash latency
+    p.flash.acr().modify(|_, w| w
+        .latency().ws5()
+        .prften().set_bit()
+        .icen().set_bit()
+        .dcen().set_bit()
+    );
+
+    // Enable HSE
+    p.rcc.cr().modify(|_, w| w.hseon().set_bit());
+    while p.rcc.cr().read().hserdy().bit_is_clear() {
+        // wait for HSE ready
+    }
+
+    // Configure PLL (HSE = 8MHz, PLLM = 4, PLLN = 90, PLLP = 2, PLLQ = 4)
+    // → System clock = (8MHz / 4) * 90 / 2 = 90MHz
+    p.rcc.pllcfgr().modify(|_, w| unsafe {
+        w.pllsrc().hse()
+         .pllm().bits(4)
+         .plln().bits(90)
+         .pllp().div2()
+         .pllq().bits(4)
+    });
+
+    // Enable PLL
+    p.rcc.cr().modify(|_, w| w.pllon().set_bit());
+    while p.rcc.cr().read().pllrdy().bit_is_clear() {
+        // wait for PLL ready
+    }
+
+    // Configure bus clocks
+    p.rcc.cfgr().modify(|_, w| w
+        .hpre().div1()    // AHB = SYSCLK / 1 = 90MHz
+        .ppre1().div4()   // APB1 = SYSCLK / 4 = 22.5MHz
+        .ppre2().div2()   // APB2 = SYSCLK / 2 = 45MHz
+    );
+
+    // Switch to PLL as system clock source
+    p.rcc.cfgr().modify(|_, w| w.sw().pll());
+    while !p.rcc.cfgr().read().sws().is_pll() {
+        // wait for PLL to be the system clock source
+    }
+}
+
+#[exception]
+fn SysTick() {
+    systick::increment_tick();
+}
+
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    loop {
+        asm::nop();
     }
 }

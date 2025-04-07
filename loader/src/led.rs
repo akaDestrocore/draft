@@ -64,6 +64,18 @@ impl<'a> Leds<'a> {
         }
     }
 
+    pub fn get(&self, led: u8) -> bool {
+        unsafe {
+            match led {
+                0 => self.gpiod.odr().read().odr12().bit(),
+                1 => self.gpiod.odr().read().odr13().bit(),
+                2 => self.gpiod.odr().read().odr14().bit(),
+                3 => self.gpiod.odr().read().odr15().bit(),
+                _ => false,
+            }
+        }
+    }
+
     pub fn toggle(&mut self, led: u8) {
         unsafe {
             match led {
@@ -111,26 +123,8 @@ impl<'a> Leds<'a> {
     }
 
     pub fn set_all(&mut self, state: bool) {
-        if state {
-            // Turn on all LEDs
-            unsafe {
-                self.gpiod.bsrr().write(|w| {
-                    w.bs12().set_bit()
-                     .bs13().set_bit()
-                     .bs14().set_bit()
-                     .bs15().set_bit()
-                });
-            }
-        } else {
-            // Turn off all LEDs
-            unsafe {
-                self.gpiod.bsrr().write(|w| {
-                    w.br12().set_bit()
-                     .br13().set_bit()
-                     .br14().set_bit()
-                     .br15().set_bit()
-                });
-            }
+        for led in 0..4 {
+            self.set(led, state);
         }
     }
 }
