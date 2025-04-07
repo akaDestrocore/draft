@@ -133,7 +133,7 @@ fn main() -> ! {
                         if boot_option == BootOption::SelectUpdateTarget {
                             // Start application update
                             uart.send_string("\r\nUpdating application...\r\n");
-                            uart.send_string("Send file using XMODEM protocol (standard mode, not CRC)\r\n");
+                            uart.send_string("Send file using XMODEM protocol with CRC-16\r\n");
                             firmware_target = APP_ADDR;
                             xmodem.start(firmware_target);
                             update_in_progress = true;
@@ -144,6 +144,11 @@ fn main() -> ! {
                             leds.set(1, true);  // Orange - XMODEM active
                             leds.set(2, false); // Red - no error
                             leds.set(3, false); // Blue - no data received yet
+                            
+                            // Send the initial 'C' character immediately
+                            if let Some(response) = xmodem.get_response() {
+                                uart.send_byte(response);
+                            }
                         } else {
                             // Directly boot application
                             if bootloader::is_firmware_valid(APP_ADDR) {
@@ -198,7 +203,7 @@ fn main() -> ! {
                                 if byte == b'U' || byte == b'u' {
                                     // Update updater firmware
                                     uart.send_string("\r\nUpdating updater...\r\n");
-                                    uart.send_string("Send file using XMODEM protocol (standard mode, not CRC)\r\n");
+                                    uart.send_string("Send file using XMODEM protocol with CRC-16\r\n");
                                     firmware_target = UPDATER_ADDR;
                                     xmodem.start(firmware_target);
                                     update_in_progress = true;
@@ -209,6 +214,11 @@ fn main() -> ! {
                                     leds.set(1, true);  // Orange - XMODEM active
                                     leds.set(2, false); // Red - no error
                                     leds.set(3, false); // Blue - no data received yet
+                                    
+                                    // Send the initial 'C' character immediately
+                                    if let Some(response) = xmodem.get_response() {
+                                        uart.send_byte(response);
+                                    }
                                 } else {
                                     uart.send_string("\r\nInvalid option, cancelled.\r\n");
                                     boot_option = BootOption::None;
@@ -237,6 +247,10 @@ fn main() -> ! {
                         // No response needed
                     },
                     Err(XmodemError::TransferComplete) => {
+                        // Send ACK for EOT
+                        if let Some(response) = xmodem.get_response() {
+                            uart.send_byte(response);
+                        }
                         uart.send_string("\r\nTransfer complete! Firmware updated successfully.\r\n");
                         update_in_progress = false;
                         
@@ -295,12 +309,10 @@ fn main() -> ! {
                 }
             }
             
-            // Send periodic NAK or 'C' during waiting phase
-            if xmodem.get_state() == XmodemState::WaitingForData {
-                if xmodem.should_send_c() {
-                    if let Some(response) = xmodem.get_response() {
-                        uart.send_byte(response);
-                    }
+            // Check if we need to send any bytes (like 'C' during initialization)
+            if xmodem.should_send_byte() {
+                if let Some(response) = xmodem.get_response() {
+                    uart.send_byte(response);
                 }
             }
             

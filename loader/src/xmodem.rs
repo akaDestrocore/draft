@@ -1,22 +1,19 @@
 use core::mem;
 use misc::flash;
 use misc::systick;
-use misc::image::{ImageHeader, IMAGE_MAGIC_APP, IMAGE_MAGIC_UPDATER, IMAGE_TYPE_APP, IMAGE_TYPE_UPDATER};
+use misc::image::{ ImageHeader, IMAGE_MAGIC_APP, IMAGE_MAGIC_UPDATER, IMAGE_TYPE_APP, IMAGE_TYPE_UPDATER };
 use stm32f4 as pac;
 
 // XMODEM constants
 pub const SOH: u8 = 0x01;   // Start of 128-byte Header
-pub const STX: u8 = 0x02;   // Start of 1024-byte Header (not used but recognized)
 pub const EOT: u8 = 0x04;   // End of Transmission
 pub const ACK: u8 = 0x06;   // Acknowledge
 pub const NAK: u8 = 0x15;   // Negative Acknowledge
 pub const CAN: u8 = 0x18;   // Cancel
-pub const ETB: u8 = 0x17;   // End of Transmission Block
-pub const C: u8   = 0x43;   // Request CRC-16
+pub const X_C: u8 = 0x43;   // Request CRC-16
 
-// Define timeout values (milliseconds)
-const INITIAL_TIMEOUT_MS: u32 = 10000;   // 10 seconds for initial connection
-const PACKET_TIMEOUT_MS: u32 = 5000;     // 5 seconds for each packet
+// Define timeout values (millis)
+const PACKET_TIMEOUT_MS: u32 = 5000;     // 5 sec for each packet
 const C_RETRY_INTERVAL_MS: u32 = 3000;   // 3 seconds between 'C' retries
 
 // Maximum number of retries before giving up
@@ -98,7 +95,7 @@ impl XmodemManager {
         self.packet_count = 0;
         self.retries = 0;
         self.first_packet_processed = false;
-        self.next_byte_to_send = Some(C);
+        self.next_byte_to_send = Some(X_C);  // Set initial 'C' character to send immediately
         self.last_poll_time = systick::get_tick_ms();
         
         // Set expected magic based on address
@@ -153,7 +150,7 @@ impl XmodemManager {
                 } else {
                     // Check for timeout to resend 'C'
                     if current_time.wrapping_sub(self.last_poll_time) >= C_RETRY_INTERVAL_MS {
-                        self.next_byte_to_send = Some(C);
+                        self.next_byte_to_send = Some(X_C);
                         self.last_poll_time = current_time;
                         self.retries += 1;
                         
@@ -399,23 +396,30 @@ impl XmodemManager {
         crc
     }
 
-    /// Check if we should send 'C' based on timeout
-    pub fn should_send_c(&mut self) -> bool {
-        if self.state == XmodemState::SendingInitialC {
-            let current_time = systick::get_tick_ms();
-            if current_time.wrapping_sub(self.last_poll_time) >= C_RETRY_INTERVAL_MS {
-                self.next_byte_to_send = Some(C);
-                self.last_poll_time = current_time;
-                self.retries += 1;
-                
-                if self.retries >= MAX_RETRIES {
-                    self.state = XmodemState::Error;
+    /// Check if we need to send any bytes (like 'C' or NAK)
+    pub fn should_send_byte(&mut self) -> bool {
+        match self.state {
+            XmodemState::SendingInitialC => {
+                let current_time = systick::get_tick_ms();
+                if current_time.wrapping_sub(self.last_poll_time) >= C_RETRY_INTERVAL_MS || self.next_byte_to_send.is_some() {
+                    // Time to send another 'C' or immediately after start
+                    if self.next_byte_to_send.is_none() {
+                        self.next_byte_to_send = Some(X_C);
+                    }
+                    self.last_poll_time = current_time;
+                    self.retries += 1;
+                    
+                    if self.retries >= MAX_RETRIES {
+                        self.state = XmodemState::Error;
+                    }
+                    
+                    true
+                } else {
+                    false
                 }
-                
-                return true;
-            }
+            },
+            _ => self.next_byte_to_send.is_some()
         }
-        false
     }
 
     /// Get the response byte to send (if any)
