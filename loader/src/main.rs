@@ -12,7 +12,7 @@ use cortex_m::{asm, peripheral::SYST};
 use cortex_m_rt::{entry, exception};
 use led::Leds;
 use misc::{
-    image::{SharedMemory, IMAGE_TYPE_APP, IMAGE_TYPE_UPDATER},
+    image::{ImageHeader,SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_MAGIC_UPDATER, IMAGE_MAGIC_APP, IMAGE_TYPE_LOADER},
     systick,
 };
 use stm32f4 as pac;
@@ -28,6 +28,15 @@ pub const BOOT_TIMEOUT_MS: u32 = 10_000; // 10 seconds
 #[no_mangle]
 #[link_section = ".shared_memory"]
 pub static mut SHARED_MEMORY: SharedMemory = SharedMemory::new();
+
+#[no_mangle]
+#[link_section = ".image_hdr"]
+pub static IMAGE_HEADER: ImageHeader = ImageHeader::new(
+    IMAGE_TYPE_LOADER,
+    IMAGE_MAGIC_LOADER,
+    1, 0, 0  // ver 1.0.0
+);
+
 
 #[entry]
 fn main() -> ! {
