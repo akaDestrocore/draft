@@ -4,7 +4,7 @@ use stm32f4 as pac;
 use cortex_m::asm;
 use core::mem;
 
-// Import rmodem functionality
+// Импортируем необходимые типы из rmodem
 use rmodem::{
     Control, 
     Error as RmodemError, 
@@ -12,23 +12,14 @@ use rmodem::{
     XmodemData,
     Sequence,
     Checksum,
-    SOH, STX, EOT, ACK, NAK, CAN, IDLE
+    SOH, STX, EOT, ACK, NAK, CAN, IDLE, CPMEOF
 };
-
-// XMODEM constants from rmodem
-pub const SOH: u8 = rmodem::SOH;
-pub const STX: u8 = rmodem::STX;
-pub const EOT: u8 = rmodem::EOT;
-pub const ACK: u8 = rmodem::ACK;
-pub const NAK: u8 = rmodem::NAK;
-pub const CAN: u8 = rmodem::CAN;
-pub const C: u8 = rmodem::IDLE; // ASCII 'C' (0x43)
 
 // XMODEM state machine
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum XmodemState {
     Idle,           // Not receiving data
-    WaitingForData, // Waiting for data (sent 'C' or NAK)
+    WaitingForData, // Waiting for data (sent NAK or C)
     ReceivingData,  // Receiving data
     Error,          // Error state
     Complete,       // Transfer complete
@@ -110,6 +101,8 @@ pub struct XmodemManager {
     use_crc: bool,             // Use CRC instead of simple checksum
     expected_magic: u32,       // Expected magic number
     first_packet_validated: bool, // Flag that first packet was validated
+    poll_interval_ms: u32,     // Interval for sending 'C' or NAK
+    has_sent_initial: bool,    // Flag to track if initial 'C' or NAK was sent
 }
 
 impl XmodemManager {
@@ -128,6 +121,8 @@ impl XmodemManager {
             use_crc: false,
             expected_magic: 0,
             first_packet_validated: false,
+            poll_interval_ms: 3000, // 3 seconds between retries
+            has_sent_initial: false,
         }
     }
 
@@ -140,11 +135,14 @@ impl XmodemManager {
         self.current_address = address;
         self.packet_number = 1;
         self.last_poll_time = systick::get_tick_ms();
-        self.next_byte_to_send = Some(NAK);  // Standard XMODEM starts with NAK
         self.buffer_index = 0;
         self.packet_count = 0;
-        self.use_crc = false;
         self.first_packet_validated = false;
+        self.has_sent_initial = false;
+        
+        // Default to standard XMODEM mode first (using NAK)
+        // We will try CRC mode only if standard mode doesn't work
+        self.use_crc = false;
         
         // Set expected magic number based on address
         if address == crate::APP_ADDR {
@@ -165,6 +163,10 @@ impl XmodemManager {
         
         if result > 0 {
             self.last_sector_erased = address;
+            
+            // Prepare to send the first NAK
+            self.next_byte_to_send = Some(NAK);
+            self.has_sent_initial = false;
         } else {
             let _ = breakpoint_helper(2); // Breakpoint: Erase Error
             self.state = XmodemState::Error;
@@ -179,17 +181,32 @@ impl XmodemManager {
     /// Check if NAK/C needs to be sent
     pub fn should_send_c(&mut self) -> bool {
         if self.state == XmodemState::WaitingForData {
+            // If we haven't sent the initial byte, send it immediately
+            if !self.has_sent_initial {
+                if self.use_crc {
+                    self.next_byte_to_send = Some(IDLE);
+                    let _ = breakpoint_helper(3); // Breakpoint: Sending initial 'C'
+                } else {
+                    self.next_byte_to_send = Some(NAK);
+                    let _ = breakpoint_helper(4); // Breakpoint: Sending initial NAK
+                }
+                self.has_sent_initial = true;
+                self.last_poll_time = systick::get_tick_ms();
+                return true;
+            }
+            
+            // Otherwise, check the time interval
             let current_time = systick::get_tick_ms();
-            if current_time.wrapping_sub(self.last_poll_time) >= 3000 {
+            if current_time.wrapping_sub(self.last_poll_time) >= self.poll_interval_ms {
                 self.last_poll_time = current_time;
                 
                 // In standard mode send NAK, in CRC mode send 'C'
                 if self.use_crc {
-                    self.next_byte_to_send = Some(C);
-                    let _ = breakpoint_helper(3); // Breakpoint: Sending 'C'
+                    self.next_byte_to_send = Some(IDLE);
+                    let _ = breakpoint_helper(5); // Breakpoint: Sending periodic 'C'
                 } else {
                     self.next_byte_to_send = Some(NAK);
-                    let _ = breakpoint_helper(4); // Breakpoint: Sending NAK
+                    let _ = breakpoint_helper(6); // Breakpoint: Sending periodic NAK
                 }
                 
                 return true;
@@ -203,7 +220,7 @@ impl XmodemManager {
         let response = self.next_byte_to_send;
         if let Some(byte) = response {
             unsafe { DEBUG_LAST_BYTE = byte; }
-            let _ = breakpoint_helper(5); // Breakpoint: Sending byte
+            let _ = breakpoint_helper(7); // Breakpoint: Sending byte
         }
         self.next_byte_to_send = None;
         response
