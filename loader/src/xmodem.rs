@@ -7,19 +7,25 @@ pub const STX: u8 = 0x02;  // Start of header (1K bytes)
 pub const EOT: u8 = 0x04;  // End of transmission
 pub const ACK: u8 = 0x06;  // Acknowledge
 pub const NAK: u8 = 0x15;  // Negative acknowledge
-pub const CAN: u8 = 0x18;  // Cancel
+pub const CAN: u8 = 0x18;  // Cancel (24)
 pub const C: u8 = 0x43;    // ASCII 'C' for CRC mode
+
+// Максимальное количество попыток для пакета
+const MAX_RETRIES: u8 = 10;
+// Интервал отправки символа 'C' для инициации передачи (мс)
+const C_INTERVAL_MS: u32 = 1000;
 
 // XMODEM state machine
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum XmodemState {
-    Idle,           // Not receiving
-    Start,          // Starting a transmission
-    WaitForHeader,  // Waiting for packet header (SOH/STX)
-    ReceiveData,    // Receiving data
-    CheckCrc,       // Verifying CRC
-    FinishTransfer, // Finishing transfer
-    Error,          // Error state
+    Idle,           // Не принимаем данные
+    WaitSOH,        // Ожидаем начала пакета (SOH/STX)
+    WaitIndex1,     // Ожидаем номер пакета
+    WaitIndex2,     // Ожидаем комплементарный номер пакета
+    ReceiveData,    // Получение данных
+    CheckCrc,       // Проверка CRC
+    FinishTransfer, // Завершение передачи
+    Error,          // Состояние ошибки
 }
 
 #[derive(Debug)]
@@ -31,7 +37,7 @@ pub enum XmodemError {
     FlashWriteError,
 }
 
-/// CRC16 calculation for XMODEM protocol (CCITT)
+/// Функция для вычисления CRC-16 CCITT для данных XMODEM
 fn calculate_crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0;
     
@@ -51,18 +57,19 @@ fn calculate_crc16(data: &[u8]) -> u16 {
 }
 
 pub struct XmodemManager {
-    state: XmodemState,
-    target_address: u32,
-    current_address: u32,
-    buffer: [u8; 1024+5], // Data buffer (1K max packet + header + CRC)
-    buffer_index: usize,
-    packet_size: usize,
-    packet_number: u8,
-    last_c_time: u32,
-    response: Option<u8>,
-    retries: u8,
-    transfer_started: bool,
-    last_erase_sector: u32,
+    state: XmodemState,           // Текущее состояние
+    target_address: u32,          // Целевой адрес для прошивки
+    current_address: u32,         // Текущий адрес для записи
+    buffer: [u8; 133],            // Буфер для пакета (128 данных + 5 служебных байтов)
+    buffer_index: usize,          // Индекс в буфере
+    data_size: usize,             // Размер данных в пакете (128 или 1024)
+    packet_number: u8,            // Ожидаемый номер пакета
+    prev_packet_number: u8,       // Предыдущий номер пакета
+    last_c_time: u32,             // Время последней отправки 'C'
+    response: Option<u8>,         // Байт для отправки
+    retries: u8,                  // Счетчик попыток
+    first_packet: bool,           // Флаг первого пакета
+    last_sector_erased: u32,      // Последний стертый сектор
 }
 
 impl XmodemManager {
@@ -71,218 +78,247 @@ impl XmodemManager {
             state: XmodemState::Idle,
             target_address: 0,
             current_address: 0,
-            buffer: [0; 1024+5],
+            buffer: [0; 133],
             buffer_index: 0,
-            packet_size: 0,
-            packet_number: 0,
+            data_size: 128,        // По умолчанию 128 байт
+            packet_number: 1,      // Начальный номер пакета
+            prev_packet_number: 0, // Предыдущий номер пакета
             last_c_time: 0,
             response: None,
             retries: 0,
-            transfer_started: false,
-            last_erase_sector: 0,
+            first_packet: true,
+            last_sector_erased: 0,
         }
     }
 
-    /// Start an XMODEM transfer
+    /// Инициализация приема по XMODEM
     pub fn start(&mut self, address: u32) {
-        self.state = XmodemState::Start;
+        self.state = XmodemState::WaitSOH;
         self.target_address = address;
         self.current_address = address;
         self.buffer_index = 0;
         self.packet_number = 1;
+        self.prev_packet_number = 0;
         self.last_c_time = systick::get_tick_ms();
-        self.response = Some(C); // Send initial 'C'
+        self.response = Some(C);  // Отправить начальный 'C'
         self.retries = 0;
-        self.transfer_started = false;
-        self.last_erase_sector = 0;
+        self.first_packet = true;
         
-        // We're starting a transfer - let's erase the first sector
-        let sector_erased = unsafe { 
+        // Стираем первый сектор перед началом приема
+        let result = unsafe { 
             flash::erase_sector(&pac::Peripherals::steal(), address) 
         };
         
-        if sector_erased == 0 {
-            self.state = XmodemState::Error;
+        if result > 0 {
+            self.last_sector_erased = address;
         } else {
-            self.last_erase_sector = address;
+            self.state = XmodemState::Error;
         }
     }
 
-    /// Get the current state
+    /// Получить текущее состояние
     pub fn get_state(&self) -> XmodemState {
         self.state
     }
 
-    /// Check if we should send a 'C' character to initiate transfer
+    /// Проверка необходимости отправки 'C' для инициации передачи
     pub fn should_send_c(&mut self) -> bool {
-        if self.state == XmodemState::Start {
+        if self.state == XmodemState::WaitSOH {
             let current_time = systick::get_tick_ms();
-            if current_time.wrapping_sub(self.last_c_time) >= 3000 {
+            if current_time.wrapping_sub(self.last_c_time) >= C_INTERVAL_MS {
                 self.last_c_time = current_time;
+                self.response = Some(C);
                 return true;
             }
         }
         false
     }
 
-    /// Get response byte to send
+    /// Получить байт для отправки
     pub fn get_response(&mut self) -> Option<u8> {
-        let response = self.response;
+        let resp = self.response;
         self.response = None;
-        response
+        resp
     }
 
-    /// Process a received byte
+    /// Обработка принятого байта
     pub fn process_byte(&mut self, byte: u8) -> Result<bool, XmodemError> {
         match self.state {
             XmodemState::Idle => {
-                // Not receiving
+                // Не выполняем прием
                 Ok(false)
             },
             
-            XmodemState::Start => {
-                if byte == SOH {
-                    // Start of 128-byte packet
-                    self.buffer[0] = byte;
-                    self.buffer_index = 1;
-                    self.packet_size = 128;
-                    self.state = XmodemState::ReceiveData;
-                    self.transfer_started = true;
-                    Ok(true)
-                } else if byte == STX {
-                    // Start of 1K packet
-                    self.buffer[0] = byte;
-                    self.buffer_index = 1;
-                    self.packet_size = 1024;
-                    self.state = XmodemState::ReceiveData;
-                    self.transfer_started = true;
-                    Ok(true)
-                } else if byte == EOT {
-                    // End of transmission
-                    self.state = XmodemState::FinishTransfer;
-                    self.response = Some(ACK);
-                    Err(XmodemError::TransferComplete)
-                } else if byte == CAN {
-                    // Cancelled by sender
-                    self.state = XmodemState::Idle;
-                    Err(XmodemError::Cancelled)
-                } else {
-                    // Ignore other bytes
-                    Ok(false)
+            XmodemState::WaitSOH => {
+                match byte {
+                    SOH => {
+                        // Начало пакета 128 байт
+                        self.buffer[0] = byte;
+                        self.buffer_index = 1;
+                        self.data_size = 128;
+                        self.state = XmodemState::WaitIndex1;
+                        Ok(false)  // Еще не готовы отправить ответ
+                    },
+                    STX => {
+                        // Начало пакета 1024 байт
+                        self.buffer[0] = byte;
+                        self.buffer_index = 1;
+                        self.data_size = 1024;
+                        self.state = XmodemState::WaitIndex1;
+                        Ok(false)
+                    },
+                    EOT => {
+                        // Конец передачи
+                        self.response = Some(ACK);
+                        self.state = XmodemState::Idle;
+                        Err(XmodemError::TransferComplete)
+                    },
+                    CAN => {
+                        // Передача отменена
+                        self.state = XmodemState::Idle;
+                        Err(XmodemError::Cancelled)
+                    },
+                    _ => {
+                        // Игнорируем другие байты
+                        Ok(false)
+                    }
                 }
             },
             
-            XmodemState::WaitForHeader => {
-                    Ok(false)
+            XmodemState::WaitIndex1 => {
+                // Получен номер пакета
+                self.buffer[1] = byte;
+                self.buffer_index = 2;
+                self.state = XmodemState::WaitIndex2;
+                Ok(false)
             },
-
-            XmodemState::ReceiveData => {
-                if byte == CAN {
-                    // Cancelled by sender
-                    self.state = XmodemState::Idle;
-                    return Err(XmodemError::Cancelled);
+            
+            XmodemState::WaitIndex2 => {
+                // Получен комплементарный номер пакета
+                self.buffer[2] = byte;
+                self.buffer_index = 3;
+                
+                // Проверяем, что номер пакета и его комплемент корректны
+                if self.buffer[1] + self.buffer[2] != 255 {
+                    // Ошибка в номере пакета
+                    self.response = Some(NAK);
+                    self.state = XmodemState::WaitSOH;
+                    self.retries += 1;
+                    
+                    if self.retries > MAX_RETRIES {
+                        self.state = XmodemState::Error;
+                        return Err(XmodemError::InvalidPacket);
+                    }
+                    
+                    return Ok(true);
                 }
                 
-                // Store the byte
+                // Проверяем номер пакета
+                if self.first_packet {
+                    // Для первого пакета принимаем любой номер (в пределах разумного)
+                    self.packet_number = self.buffer[1];
+                    self.first_packet = false;
+                } else if self.buffer[1] != self.packet_number {
+                    // Несоответствие номера пакета ожидаемому
+                    // Если это повторный пакет, принимаем его
+                    if self.buffer[1] == self.prev_packet_number {
+                        // Это повторный пакет, который мы уже получили, просто подтверждаем
+                        self.response = Some(ACK);
+                        self.state = XmodemState::WaitSOH;
+                        return Ok(true);
+                    } else {
+                        // Неправильный номер пакета
+                        self.response = Some(NAK);
+                        self.state = XmodemState::WaitSOH;
+                        self.retries += 1;
+                        
+                        if self.retries > MAX_RETRIES {
+                            self.state = XmodemState::Error;
+                            return Err(XmodemError::InvalidPacket);
+                        }
+                        
+                        return Ok(true);
+                    }
+                }
+                
+                // Номер пакета корректный, переходим к приему данных
+                self.state = XmodemState::ReceiveData;
+                Ok(false)
+            },
+            
+            XmodemState::ReceiveData => {
+                // Получение данных пакета
                 self.buffer[self.buffer_index] = byte;
                 self.buffer_index += 1;
                 
-                // Check if we have received the whole packet
-                if self.buffer_index == 3 + self.packet_size + 2 {
+                // Проверяем, получили ли все данные и CRC
+                if self.buffer_index == 3 + self.data_size + 2 {
+                    // Получен весь пакет (SOH + номер пакета + комплемент + данные + CRC)
                     self.state = XmodemState::CheckCrc;
                     
-                    // Verify packet number
-                    let packet_num = self.buffer[1];
-                    let packet_num_complement = self.buffer[2];
+                    // Проверяем CRC
+                    let crc_received = ((self.buffer[3 + self.data_size] as u16) << 8) | 
+                                       (self.buffer[3 + self.data_size + 1] as u16);
                     
-                    if packet_num + packet_num_complement != 255 {
-                        // Invalid packet numbering
-                        self.response = Some(NAK);
-                        self.state = XmodemState::Start;
-                        self.retries += 1;
-                        if self.retries > 10 {
-                            self.state = XmodemState::Error;
-                            return Err(XmodemError::InvalidPacket);
-                        }
-                        return Ok(true);
-                    }
-                    
-                    // If it's the first packet and packet number is not 1,
-                    // it might be a retransmission - accept it
-                    if !self.transfer_started && packet_num != 1 {
-                        self.packet_number = packet_num;
-                    }
-                    
-                    // Verify packet number sequence
-                    if packet_num != self.packet_number {
-                        // Wrong packet number, request retransmission
-                        self.response = Some(NAK);
-                        self.state = XmodemState::Start;
-                        self.retries += 1;
-                        if self.retries > 10 {
-                            self.state = XmodemState::Error;
-                            return Err(XmodemError::InvalidPacket);
-                        }
-                        return Ok(true);
-                    }
-                    
-                    // Verify CRC
-                    let crc_received = ((self.buffer[3 + self.packet_size] as u16) << 8) 
-                                    | (self.buffer[3 + self.packet_size + 1] as u16);
-                    
-                    let crc_calculated = calculate_crc16(&self.buffer[3..3 + self.packet_size]);
+                    let crc_calculated = calculate_crc16(&self.buffer[3..3 + self.data_size]);
                     
                     if crc_received != crc_calculated {
-                        // CRC error, request retransmission
+                        // Ошибка CRC
                         self.response = Some(NAK);
-                        self.state = XmodemState::Start;
+                        self.state = XmodemState::WaitSOH;
                         self.retries += 1;
-                        if self.retries > 10 {
+                        
+                        if self.retries > MAX_RETRIES {
                             self.state = XmodemState::Error;
                             return Err(XmodemError::InvalidPacket);
                         }
+                        
                         return Ok(true);
                     }
                     
-                    // Check if we need to erase next flash sector
-                    let next_address = self.current_address + self.packet_size as u32;
-                    let current_sector = self.current_address & 0xFF000000 | (self.current_address & 0x00FF0000);
-                    let next_sector = next_address & 0xFF000000 | (next_address & 0x00FF0000);
+                    // Проверяем, нужно ли стереть следующий сектор
+                    let next_address = self.current_address + self.data_size as u32;
+                    let current_sector = self.current_address & 0xFFFF0000;
+                    let next_sector = next_address & 0xFFFF0000;
                     
-                    if current_sector != next_sector && next_sector != self.last_erase_sector {
-                        // Need to erase a new sector
-                        let sector_erased = unsafe { 
+                    if current_sector != next_sector && next_sector != self.last_sector_erased {
+                        // Нужно стереть новый сектор
+                        let result = unsafe { 
                             flash::erase_sector(&pac::Peripherals::steal(), next_sector) 
                         };
                         
-                        if sector_erased == 0 {
+                        if result == 0 {
+                            // Ошибка стирания
                             self.state = XmodemState::Error;
                             return Err(XmodemError::FlashWriteError);
                         }
                         
-                        self.last_erase_sector = next_sector;
+                        self.last_sector_erased = next_sector;
                     }
                     
-                    // Write to flash
-                    let write_result = unsafe { 
+                    // Записываем данные во flash
+                    let result = unsafe { 
                         flash::write(&pac::Peripherals::steal(), 
-                                    &self.buffer[3..3 + self.packet_size], 
+                                    &self.buffer[3..3 + self.data_size], 
                                     self.current_address)
                     };
                     
-                    if write_result != 0 {
-                        // Flash write error
+                    if result != 0 {
+                        // Ошибка записи
                         self.state = XmodemState::Error;
                         return Err(XmodemError::FlashWriteError);
                     }
                     
-                    // Update address and packet number
-                    self.current_address += self.packet_size as u32;
+                    // Сохраняем предыдущий номер пакета
+                    self.prev_packet_number = self.packet_number;
+                    
+                    // Увеличиваем адрес и номер пакета
+                    self.current_address += self.data_size as u32;
                     self.packet_number = self.packet_number.wrapping_add(1);
                     
-                    // Acknowledge the packet
+                    // Успешно приняли и записали пакет
                     self.response = Some(ACK);
-                    self.state = XmodemState::Start;
+                    self.state = XmodemState::WaitSOH;
                     self.buffer_index = 0;
                     self.retries = 0;
                     
@@ -293,21 +329,21 @@ impl XmodemManager {
             },
             
             XmodemState::CheckCrc => {
-                // This state is handled directly in ReceiveData
-                // Should never reach here
-                self.state = XmodemState::Start;
+                // Это состояние не используется в такой реализации
+                // (CRC проверяется в ReceiveData)
+                self.state = XmodemState::WaitSOH;
                 Ok(false)
             },
             
             XmodemState::FinishTransfer => {
-                // End of transfer
+                // Завершение передачи
                 self.state = XmodemState::Idle;
                 self.response = Some(ACK);
                 Err(XmodemError::TransferComplete)
             },
             
             XmodemState::Error => {
-                // Error state
+                // Состояние ошибки
                 self.state = XmodemState::Idle;
                 Ok(false)
             }

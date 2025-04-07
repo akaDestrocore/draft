@@ -139,8 +139,9 @@ fn main() -> ! {
                         uart.send_string("\r\n--- System Diagnostics ---\r\n");
                         let state_str = match xmodem.get_state() {
                             XmodemState::Idle => "Idle",
-                            XmodemState::Start => "Start",
-                            XmodemState::WaitForHeader => "WaitForHeader",
+                            XmodemState::WaitSOH => "WaitSOH",
+                            XmodemState::WaitIndex1 => "WaitIndex1",
+                            XmodemState::WaitIndex2 => "WaitIndex2",
                             XmodemState::ReceiveData => "ReceiveData",
                             XmodemState::CheckCrc => "CheckCrc",
                             XmodemState::FinishTransfer => "FinishTransfer",
@@ -228,7 +229,7 @@ fn main() -> ! {
             }
             
             // Send periodic 'C' during startup phase
-            if xmodem.get_state() == XmodemState::Start {
+            if xmodem.get_state() == XmodemState::WaitSOH {
                 if xmodem.should_send_c() {
                     uart.send_byte(b'C');
                 }
