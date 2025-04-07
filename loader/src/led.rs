@@ -7,7 +7,7 @@ pub struct Leds<'a> {
 impl<'a> Leds<'a> {
     pub fn new(p: &'a pac::Peripherals) -> Self {
         Self {
-            gpiod: &*p.gpiod.moder().as_ptr().cast::<pac::gpiod::RegisterBlock>(),
+            gpiod: unsafe { &*p.gpiod.moder().as_ptr().cast::<pac::gpiod::RegisterBlock>() },
         }
     }
 
@@ -63,6 +63,7 @@ impl<'a> Leds<'a> {
             }
         }
     }
+
     pub fn toggle(&mut self, led: u8) {
         unsafe {
             match led {
