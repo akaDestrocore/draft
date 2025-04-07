@@ -173,26 +173,7 @@ impl XmodemManager {
             },
             
             XmodemState::WaitForHeader => {
-                if byte == SOH {
-                    self.buffer[0] = byte;
-                    self.buffer_index = 1;
-                    self.packet_size = 128;
-                    self.state = XmodemState::ReceiveData;
-                    self.transfer_started = true;
-                    Ok(true)
-                } else if byte == STX {
-                    self.buffer[0] = byte;
-                    self.buffer_index = 1;
-                    self.packet_size = 1024;
-                    self.state = XmodemState::ReceiveData;
-                    self.transfer_started = true;
-                    Ok(true)
-                } else if byte == CAN {
-                    self.state = XmodemState::Idle;
-                    Err(XmodemError::Cancelled)
-                } else {
                     Ok(false)
-                }
             },
 
             XmodemState::ReceiveData => {
