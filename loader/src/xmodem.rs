@@ -1,57 +1,71 @@
 use core::mem;
 use misc::flash;
 use misc::systick;
-use misc::image::{ImageHeader, IMAGE_MAGIC_APP, IMAGE_MAGIC_UPDATER};
+use misc::image::{ImageHeader, IMAGE_MAGIC_APP, IMAGE_MAGIC_UPDATER, IMAGE_TYPE_APP, IMAGE_TYPE_UPDATER};
 use stm32f4 as pac;
-use cortex_m::asm;
 
 // XMODEM constants
 pub const SOH: u8 = 0x01;   // Start of 128-byte Header
-pub const STX: u8 = 0x02;   // Start of 1024-byte Header
+pub const STX: u8 = 0x02;   // Start of 1024-byte Header (not used but recognized)
 pub const EOT: u8 = 0x04;   // End of Transmission
 pub const ACK: u8 = 0x06;   // Acknowledge
 pub const NAK: u8 = 0x15;   // Negative Acknowledge
 pub const CAN: u8 = 0x18;   // Cancel
-pub const C: u8   = 0x43;   // Request CRC
+pub const ETB: u8 = 0x17;   // End of Transmission Block
+pub const C: u8   = 0x43;   // Request CRC-16
+
+// Define timeout values (milliseconds)
+const INITIAL_TIMEOUT_MS: u32 = 10000;   // 10 seconds for initial connection
+const PACKET_TIMEOUT_MS: u32 = 5000;     // 5 seconds for each packet
+const C_RETRY_INTERVAL_MS: u32 = 3000;   // 3 seconds between 'C' retries
+
+// Maximum number of retries before giving up
+const MAX_RETRIES: u8 = 10;
+
+// Packet size (128 bytes + 3 header bytes + 2 CRC bytes)
+const PACKET_SIZE: usize = 133;
+const DATA_SIZE: usize = 128;
 
 // XMODEM state machine
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum XmodemState {
-    Idle,
-    SendingInitialC,    // Sending initial 'C' before file transfer
-    WaitingForData,     // Ready to receive first packet
-    ReceivingData,      // Receiving data packets
-    Error,
-    Complete,
+    Idle,                  // Initial state
+    SendingInitialC,       // Sending 'C' to initiate transfer
+    WaitingForData,        // Waiting for SOH (start of header)
+    ReceivingData,         // Receiving packet data
+    ProcessingPacket,      // Validating and processing the packet
+    Error,                 // Error occurred
+    Complete,              // Transfer completed successfully
 }
 
 #[derive(Debug)]
 pub enum XmodemError {
-    InvalidPacket,
-    Cancelled,
-    Timeout,
-    TransferComplete,
-    FlashWriteError,
-    InvalidMagic,     // Invalid magic number
-    OlderVersion,     // Firmware version is older than current
+    InvalidPacket,         // Invalid packet structure
+    SequenceError,         // Sequence number mismatch
+    CrcError,              // CRC checksum mismatch
+    Cancelled,             // Transfer cancelled by sender
+    Timeout,               // Timeout waiting for data
+    FlashWriteError,       // Error writing to flash
+    InvalidMagic,          // Invalid magic number in firmware
+    OlderVersion,          // Firmware version is older than current
+    TransferComplete,      // Transfer completed successfully
 }
 
 pub struct XmodemManager {
     state: XmodemState,
     target_address: u32,
     current_address: u32,
-    packet_number: u8,
+    expected_packet_number: u8,
     last_poll_time: u32,
-    buffer: [u8; 1024],  // Max 1024-byte buffer
+    buffer: [u8; PACKET_SIZE],
     buffer_index: usize,
-    last_sector_erased: u32,
-    block_size: usize,
-    use_crc: bool,
     expected_magic: u32,
-    first_packet_validated: bool,
+    expected_image_type: u8,
     packet_count: u16,
     next_byte_to_send: Option<u8>,
-    initial_c_retries: u8,
+    retries: u8,
+    first_packet_processed: bool,
+    current_sector_base: u32,
 }
 
 impl XmodemManager {
@@ -60,129 +74,115 @@ impl XmodemManager {
             state: XmodemState::Idle,
             target_address: 0,
             current_address: 0,
-            packet_number: 1,
+            expected_packet_number: 1,
             last_poll_time: 0,
-            buffer: [0; 1024],
+            buffer: [0; PACKET_SIZE],
             buffer_index: 0,
-            last_sector_erased: 0,
-            block_size: 128,  // Default XMODEM block size
-            use_crc: true,    // Default to CRC mode
             expected_magic: 0,
-            first_packet_validated: false,
+            expected_image_type: 0,
             packet_count: 0,
             next_byte_to_send: None,
-            initial_c_retries: 0,
+            retries: 0,
+            first_packet_processed: false,
+            current_sector_base: 0,
         }
     }
 
-    fn validate_image_header(&self, data: &[u8]) -> Result<(), XmodemError> {
-        if data.len() < mem::size_of::<ImageHeader>() {
-            return Err(XmodemError::InvalidPacket);
-        }
-
-        let header = unsafe {
-            let header_ptr = data.as_ptr() as *const ImageHeader;
-            *header_ptr
-        };
-
-        // Check magic number
-        if header.image_magic != self.expected_magic {
-            return Err(XmodemError::InvalidMagic);
-        }
-
-        // Here you could add version checking logic
-        // For example, compare with currently installed version
-
-        Ok(())
-    }
-
+    /// Start the XMODEM file reception process
     pub fn start(&mut self, address: u32) {
         self.state = XmodemState::SendingInitialC;
         self.target_address = address;
         self.current_address = address;
-        self.packet_number = 1;
+        self.expected_packet_number = 1;
         self.buffer_index = 0;
         self.packet_count = 0;
-        self.initial_c_retries = 0;
-        self.use_crc = true;
-        self.next_byte_to_send = Some(C);  // Start with 'C' in CRC mode
+        self.retries = 0;
+        self.first_packet_processed = false;
+        self.next_byte_to_send = Some(C);
         self.last_poll_time = systick::get_tick_ms();
         
-        // Determine block size and expected magic
+        // Set expected magic based on address
         if address == crate::APP_ADDR {
-            self.block_size = 128;
             self.expected_magic = IMAGE_MAGIC_APP;
+            self.expected_image_type = IMAGE_TYPE_APP;
         } else if address == crate::UPDATER_ADDR {
-            self.block_size = 128;
             self.expected_magic = IMAGE_MAGIC_UPDATER;
+            self.expected_image_type = IMAGE_TYPE_UPDATER;
         } else {
             self.state = XmodemState::Error;
             return;
         }
-
-        // Erase first sector
-        let peripherals = unsafe { pac::Peripherals::steal() };
-        let result = flash::erase_sector(&peripherals, address);
         
-        if result > 0 {
-            self.last_sector_erased = address;
-        } else {
-            self.state = XmodemState::Error;
+        // Initialize current sector base for flash erase tracking
+        self.current_sector_base = address;
+        
+        // Erase the first sector at target address
+        let peripherals = unsafe { pac::Peripherals::steal() };
+        match flash::erase_sector(&peripherals, address) {
+            0 => {
+                // Erase failed
+                self.state = XmodemState::Error;
+            },
+            _ => {
+                // Erase successful
+            }
         }
     }
 
+    /// Process a received byte in the XMODEM protocol
     pub fn process_byte(&mut self, byte: u8) -> Result<bool, XmodemError> {
+        let current_time = systick::get_tick_ms();
+        
         match self.state {
-            XmodemState::Idle => Ok(false),
+            XmodemState::Idle => {
+                // Nothing to do in idle state
+                Ok(false)
+            },
             
             XmodemState::SendingInitialC => {
-                // Handling timeout for initial 'C'
-                let current_time = systick::get_tick_ms();
-                if current_time.wrapping_sub(self.last_poll_time) >= 3000 {
-                    self.initial_c_retries += 1;
-                    
-                    // Max 20 retries before switching to NAK mode
-                    if self.initial_c_retries >= 20 {
-                        self.use_crc = false;
-                        self.next_byte_to_send = Some(NAK);
-                        self.state = XmodemState::WaitingForData;
-                    } else {
-                        self.next_byte_to_send = Some(C);
-                    }
-                    
+                // Check for SOH to start packet reception
+                if byte == SOH {
+                    self.buffer[0] = byte;
+                    self.buffer_index = 1;
+                    self.state = XmodemState::ReceivingData;
                     self.last_poll_time = current_time;
-                    return Ok(true);
-                }
-
-                // Switch to waiting state when first data arrives
-                match byte {
-                    SOH => {
-                        self.state = XmodemState::ReceivingData;
-                        self.block_size = 128;
-                        self.buffer[0] = byte;
-                        self.buffer_index = 1;
+                    Ok(false)
+                } else if byte == CAN {
+                    self.state = XmodemState::Error;
+                    Err(XmodemError::Cancelled)
+                } else {
+                    // Check for timeout to resend 'C'
+                    if current_time.wrapping_sub(self.last_poll_time) >= C_RETRY_INTERVAL_MS {
+                        self.next_byte_to_send = Some(C);
+                        self.last_poll_time = current_time;
+                        self.retries += 1;
+                        
+                        if self.retries >= MAX_RETRIES {
+                            self.state = XmodemState::Error;
+                            return Err(XmodemError::Timeout);
+                        }
+                        
+                        Ok(true) // Need to send 'C'
+                    } else {
                         Ok(false)
-                    },
-                    STX => {
-                        // 1K blocks not supported
-                        Ok(true)
-                    },
-                    _ => Ok(false)
+                    }
                 }
             },
             
             XmodemState::WaitingForData => {
+                // Check for timeout
+                if current_time.wrapping_sub(self.last_poll_time) >= PACKET_TIMEOUT_MS {
+                    self.state = XmodemState::Error;
+                    return Err(XmodemError::Timeout);
+                }
+                
                 match byte {
                     SOH => {
-                        self.block_size = 128;
-                        self.state = XmodemState::ReceivingData;
                         self.buffer[0] = byte;
                         self.buffer_index = 1;
+                        self.state = XmodemState::ReceivingData;
+                        self.last_poll_time = current_time;
                         Ok(false)
-                    },
-                    STX => {
-                        // 1K blocks not supported
-                        Ok(true)
                     },
                     EOT => {
                         self.state = XmodemState::Complete;
@@ -193,123 +193,245 @@ impl XmodemManager {
                         self.state = XmodemState::Error;
                         Err(XmodemError::Cancelled)
                     },
-                    _ => Ok(false)
+                    _ => Ok(false) // Ignore other bytes
                 }
             },
             
             XmodemState::ReceivingData => {
+                // Check for timeout
+                if current_time.wrapping_sub(self.last_poll_time) >= PACKET_TIMEOUT_MS {
+                    self.state = XmodemState::Error;
+                    return Err(XmodemError::Timeout);
+                }
+                
+                // Add byte to buffer
                 self.buffer[self.buffer_index] = byte;
                 self.buffer_index += 1;
-
-                if self.buffer_index == self.block_size + 5 {  // Header + Data + Checksum
-                    let packet_num = self.buffer[1];
-                    let packet_num_comp = self.buffer[2];
-
-                    // Validate packet number
-                    if packet_num + packet_num_comp != 0xFF {
-                        self.state = XmodemState::WaitingForData;
-                        self.buffer_index = 0;
-                        self.next_byte_to_send = Some(NAK);
-                        return Ok(true);
-                    }
-
-                    // First packet validation
-                    if self.packet_number == 1 && !self.first_packet_validated {
-                        match self.validate_image_header(&self.buffer[3..self.block_size+3]) {
-                            Ok(_) => {
-                                self.first_packet_validated = true;
-                            },
-                            Err(e) => {
-                                self.state = XmodemState::Error;
-                                return Err(e);
-                            }
-                        }
-                    }
-
-                    // Write to flash
-                    let peripherals = unsafe { pac::Peripherals::steal() };
-                    let result = flash::write(
-                        &peripherals, 
-                        &self.buffer[3..self.block_size+3], 
-                        self.current_address
-                    );
-
-                    if result != 0 {
-                        self.state = XmodemState::Error;
-                        return Err(XmodemError::FlashWriteError);
-                    }
-
-                    self.current_address += self.block_size as u32;
-                    self.packet_number = self.packet_number.wrapping_add(1);
-                    self.packet_count += 1;
-                    
-                    self.state = XmodemState::WaitingForData;
-                    self.buffer_index = 0;
-                    self.next_byte_to_send = Some(ACK);
-                    
-                    return Ok(true);
+                
+                // Check if we have a complete packet
+                if self.buffer_index == PACKET_SIZE {
+                    self.state = XmodemState::ProcessingPacket;
+                    self.process_packet()
+                } else {
+                    Ok(false)
                 }
-
+            },
+            
+            XmodemState::ProcessingPacket => {
+                // Nothing to do here, packet processing is done in process_packet()
                 Ok(false)
             },
             
-            XmodemState::Error => Ok(false),
-            XmodemState::Complete => Ok(false),
+            XmodemState::Error | XmodemState::Complete => {
+                // Nothing to do in these terminal states
+                Ok(false)
+            }
         }
     }
 
-    pub fn get_state(&self) -> XmodemState {
-        self.state
+    /// Process a complete XMODEM packet
+    fn process_packet(&mut self) -> Result<bool, XmodemError> {
+        // Extract packet components
+        let packet_num = self.buffer[1];
+        let packet_num_complement = self.buffer[2];
+        
+        // Verify packet number and its complement
+        if packet_num.wrapping_add(packet_num_complement) != 0xFF {
+            self.state = XmodemState::WaitingForData;
+            self.buffer_index = 0;
+            self.next_byte_to_send = Some(NAK);
+            return Err(XmodemError::SequenceError);
+        }
+        
+        // Verify packet sequence
+        if packet_num != self.expected_packet_number {
+            self.state = XmodemState::WaitingForData;
+            self.buffer_index = 0;
+            self.next_byte_to_send = Some(NAK);
+            return Err(XmodemError::SequenceError);
+        }
+        
+        // Verify CRC-16
+        let received_crc = ((self.buffer[PACKET_SIZE-2] as u16) << 8) | (self.buffer[PACKET_SIZE-1] as u16);
+        let calculated_crc = self.calculate_crc16(&self.buffer[3..3+DATA_SIZE]);
+        
+        if received_crc != calculated_crc {
+            self.state = XmodemState::WaitingForData;
+            self.buffer_index = 0;
+            self.next_byte_to_send = Some(NAK);
+            return Err(XmodemError::CrcError);
+        }
+        
+        // Handle first packet differently (check magic and version)
+        if packet_num == 1 && !self.first_packet_processed {
+            // Create a local copy of the data to avoid borrowing issues
+            let mut data_copy = [0u8; DATA_SIZE];
+            data_copy.copy_from_slice(&self.buffer[3..3+DATA_SIZE]);
+            
+            // Process first packet - contains header information
+            let result = self.process_first_packet(&data_copy);
+            if result.is_err() {
+                return result;
+            }
+        } else {
+            // Check if we need to erase the next sector
+            let next_addr = self.current_address + DATA_SIZE as u32;
+            let current_sector_end = self.current_sector_base + 0x20000; // 128K sector size
+            
+            if next_addr > current_sector_end {
+                // Need to erase next sector
+                let peripherals = unsafe { pac::Peripherals::steal() };
+                let next_sector_base = self.current_sector_base + 0x20000;
+                
+                match flash::erase_sector(&peripherals, next_sector_base) {
+                    0 => {
+                        self.state = XmodemState::Error;
+                        return Err(XmodemError::FlashWriteError);
+                    },
+                    _ => {
+                        self.current_sector_base = next_sector_base;
+                    }
+                }
+            }
+            
+            // Write data to flash (using a local copy to avoid borrowing issues)
+            let mut data_copy = [0u8; DATA_SIZE];
+            data_copy.copy_from_slice(&self.buffer[3..3+DATA_SIZE]);
+            
+            let peripherals = unsafe { pac::Peripherals::steal() };
+            let result = flash::write(&peripherals, &data_copy, self.current_address);
+            
+            if result != 0 {
+                self.state = XmodemState::Error;
+                return Err(XmodemError::FlashWriteError);
+            }
+            
+            // Update current address for next packet
+            self.current_address += DATA_SIZE as u32;
+        }
+        
+        // Packet successfully processed
+        self.state = XmodemState::WaitingForData;
+        self.buffer_index = 0;
+        self.expected_packet_number = self.expected_packet_number.wrapping_add(1);
+        self.packet_count += 1;
+        self.next_byte_to_send = Some(ACK);
+        self.last_poll_time = systick::get_tick_ms();
+        
+        Ok(true) // Need to send ACK
     }
 
-    pub fn get_packet_count(&self) -> u16 {
-        self.packet_count
+    /// Process the first packet which contains firmware header
+    fn process_first_packet(&mut self, data: &[u8]) -> Result<bool, XmodemError> {
+        // Check if we have enough data for a header
+        if data.len() < mem::size_of::<ImageHeader>() {
+            self.state = XmodemState::Error;
+            return Err(XmodemError::InvalidPacket);
+        }
+        
+        // Map data to header structure
+        let header = unsafe {
+            let header_ptr = data.as_ptr() as *const ImageHeader;
+            &*header_ptr
+        };
+        
+        // Check magic number
+        if header.image_magic != self.expected_magic {
+            self.state = XmodemState::Error;
+            return Err(XmodemError::InvalidMagic);
+        }
+        
+        // Check image type
+        if header.image_type != self.expected_image_type {
+            self.state = XmodemState::Error;
+            return Err(XmodemError::InvalidMagic);
+        }
+        
+        // Check current firmware version vs. new firmware version
+        let current_header_addr = self.target_address as *const ImageHeader;
+        let current_header = unsafe { 
+            // Only read if the address is not all 0xFF (erased flash)
+            if *(self.target_address as *const u32) != 0xFFFFFFFF {
+                Some(&*current_header_addr)
+            } else {
+                None
+            }
+        };
+        
+        if let Some(existing_header) = current_header {
+            if existing_header.is_valid() && !header.is_newer_than(existing_header) {
+                self.state = XmodemState::Error;
+                return Err(XmodemError::OlderVersion);
+            }
+        }
+        
+        // Write the first packet data (header and more) to flash
+        let peripherals = unsafe { pac::Peripherals::steal() };
+        let result = flash::write(&peripherals, data, self.current_address);
+        
+        if result != 0 {
+            self.state = XmodemState::Error;
+            return Err(XmodemError::FlashWriteError);
+        }
+        
+        // Update current address for next packet
+        self.current_address += DATA_SIZE as u32;
+        self.first_packet_processed = true;
+        
+        Ok(true)
     }
 
+    /// Calculate CRC-16 CCITT checksum for XMODEM
+    fn calculate_crc16(&self, data: &[u8]) -> u16 {
+        let mut crc: u16 = 0;
+        
+        for &byte in data {
+            crc ^= (byte as u16) << 8;
+            for _ in 0..8 {
+                if (crc & 0x8000) != 0 {
+                    crc = (crc << 1) ^ 0x1021;
+                } else {
+                    crc <<= 1;
+                }
+            }
+        }
+        
+        crc
+    }
+
+    /// Check if we should send 'C' based on timeout
     pub fn should_send_c(&mut self) -> bool {
-        match self.state {
-            XmodemState::SendingInitialC => {
-                let current_time = systick::get_tick_ms();
-                if current_time.wrapping_sub(self.last_poll_time) >= 3000 {
-                    self.initial_c_retries += 1;
-                    
-                    // Max 20 retries before switching to NAK mode
-                    if self.initial_c_retries >= 20 {
-                        self.use_crc = false;
-                        self.next_byte_to_send = Some(NAK);
-                        self.state = XmodemState::WaitingForData;
-                    } else {
-                        self.next_byte_to_send = Some(C);
-                    }
-                    
-                    self.last_poll_time = current_time;
-                    return true;
+        if self.state == XmodemState::SendingInitialC {
+            let current_time = systick::get_tick_ms();
+            if current_time.wrapping_sub(self.last_poll_time) >= C_RETRY_INTERVAL_MS {
+                self.next_byte_to_send = Some(C);
+                self.last_poll_time = current_time;
+                self.retries += 1;
+                
+                if self.retries >= MAX_RETRIES {
+                    self.state = XmodemState::Error;
                 }
-                false
-            },
-            XmodemState::WaitingForData => {
-                let current_time = systick::get_tick_ms();
-                if current_time.wrapping_sub(self.last_poll_time) >= 3000 {
-                    self.last_poll_time = current_time;
-                    
-                    // In standard mode send NAK, in CRC mode send 'C'
-                    if self.use_crc {
-                        self.next_byte_to_send = Some(C);
-                    } else {
-                        self.next_byte_to_send = Some(NAK);
-                    }
-                    
-                    return true;
-                }
-                false
-            },
-            _ => false
+                
+                return true;
+            }
         }
+        false
     }
 
+    /// Get the response byte to send (if any)
     pub fn get_response(&mut self) -> Option<u8> {
         let response = self.next_byte_to_send;
         self.next_byte_to_send = None;
         response
+    }
+
+    /// Get the current state of the XMODEM manager
+    pub fn get_state(&self) -> XmodemState {
+        self.state
+    }
+
+    /// Get the number of successfully received packets
+    pub fn get_packet_count(&self) -> u16 {
+        self.packet_count
     }
 }

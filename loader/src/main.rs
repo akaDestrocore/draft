@@ -258,6 +258,12 @@ fn main() -> ! {
                         // Red LED on to indicate timeout
                         leds.set(2, true);
                     },
+                    Err(XmodemError::SequenceError) | Err(XmodemError::CrcError) => {
+                        // XMODEM will handle retries, we just send responses
+                        if let Some(response) = xmodem.get_response() {
+                            uart.send_byte(response);
+                        }
+                    },
                     Err(XmodemError::InvalidPacket) => {
                         // XMODEM will handle retries, we just send responses
                         if let Some(response) = xmodem.get_response() {
@@ -284,7 +290,7 @@ fn main() -> ! {
                         
                         // Red LED on to indicate version error
                         leds.set(2, true);
-                    },
+                    }
                 }
             }
             
