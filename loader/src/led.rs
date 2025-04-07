@@ -7,13 +7,11 @@ pub struct Leds<'a> {
 impl<'a> Leds<'a> {
     pub fn new(p: &'a pac::Peripherals) -> Self {
         Self {
-            gpiod: unsafe { &*p.gpiod.moder().as_ptr().cast::<pac::gpiod::RegisterBlock>() },
+            gpiod: &*p.gpiod.moder().as_ptr().cast::<pac::gpiod::RegisterBlock>(),
         }
     }
 
     pub fn init(&mut self) {
-        // Enable GPIOD clock in RCC (should be done before calling this)
-        
         // Configure PD12-PD15 as outputs (green, orange, red, blue LEDs)
         unsafe {
             // Configure mode register for PD12-PD15 as output (01)
@@ -40,7 +38,7 @@ impl<'a> Leds<'a> {
                  .ospeedr15().low_speed()
             });
             
-            // Turn off all LEDs
+            // Turn off all LEDs initially
             self.gpiod.bsrr().write(|w| {
                 w.br12().set_bit()
                  .br13().set_bit()
@@ -65,14 +63,41 @@ impl<'a> Leds<'a> {
             }
         }
     }
-    
     pub fn toggle(&mut self, led: u8) {
         unsafe {
             match led {
-                0 => { let _ = self.gpiod.odr().modify(|r, w| w.odr12().bit(!r.odr12().bit())); }
-                1 => { let _ = self.gpiod.odr().modify(|r, w| w.odr13().bit(!r.odr13().bit())); }
-                2 => { let _ = self.gpiod.odr().modify(|r, w| w.odr14().bit(!r.odr14().bit())); }
-                3 => { let _ = self.gpiod.odr().modify(|r, w| w.odr15().bit(!r.odr15().bit())); }
+                0 => {
+                    let current = self.gpiod.odr().read().odr12().bit();
+                    if current {
+                        self.gpiod.bsrr().write(|w| w.br12().set_bit());
+                    } else {
+                        self.gpiod.bsrr().write(|w| w.bs12().set_bit());
+                    }
+                },
+                1 => {
+                    let current = self.gpiod.odr().read().odr13().bit();
+                    if current {
+                        self.gpiod.bsrr().write(|w| w.br13().set_bit());
+                    } else {
+                        self.gpiod.bsrr().write(|w| w.bs13().set_bit());
+                    }
+                },
+                2 => {
+                    let current = self.gpiod.odr().read().odr14().bit();
+                    if current {
+                        self.gpiod.bsrr().write(|w| w.br14().set_bit());
+                    } else {
+                        self.gpiod.bsrr().write(|w| w.bs14().set_bit());
+                    }
+                },
+                3 => {
+                    let current = self.gpiod.odr().read().odr15().bit();
+                    if current {
+                        self.gpiod.bsrr().write(|w| w.br15().set_bit());
+                    } else {
+                        self.gpiod.bsrr().write(|w| w.bs15().set_bit());
+                    }
+                },
                 _ => {}
             }
         }
@@ -85,8 +110,26 @@ impl<'a> Leds<'a> {
     }
 
     pub fn set_all(&mut self, state: bool) {
-        for led in 0..4 {
-            self.set(led, state);
+        if state {
+            // Turn on all LEDs
+            unsafe {
+                self.gpiod.bsrr().write(|w| {
+                    w.bs12().set_bit()
+                     .bs13().set_bit()
+                     .bs14().set_bit()
+                     .bs15().set_bit()
+                });
+            }
+        } else {
+            // Turn off all LEDs
+            unsafe {
+                self.gpiod.bsrr().write(|w| {
+                    w.br12().set_bit()
+                     .br13().set_bit()
+                     .br14().set_bit()
+                     .br15().set_bit()
+                });
+            }
         }
     }
 }

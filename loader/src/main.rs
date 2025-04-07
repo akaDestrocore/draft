@@ -12,10 +12,11 @@ use cortex_m::{asm, peripheral::SYST};
 use cortex_m_rt::{entry, exception};
 use led::Leds;
 use misc::{
-    image::{ImageHeader,SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_MAGIC_UPDATER, IMAGE_MAGIC_APP, IMAGE_TYPE_LOADER},
+    image::{ImageHeader, SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER},
     systick,
 };
 use stm32f4 as pac;
+use stm32f4::Peripherals;
 use uart::{UartManager, UartError};
 use xmodem::{XmodemManager, XmodemError, XmodemState};
 
@@ -37,40 +38,45 @@ pub static IMAGE_HEADER: ImageHeader = ImageHeader::new(
     1, 0, 0  // ver 1.0.0
 );
 
-
 #[entry]
 fn main() -> ! {
-    let peripherals = pac::Peripherals::take().unwrap();
-    let mut core_peripherals = cortex_m::Peripherals::take().unwrap();
+    let p = pac::Peripherals::take().unwrap();
+    let mut cp = cortex_m::Peripherals::take().unwrap();
 
     // Setup system clock to 90MHz
-    setup_system_clock(&peripherals);
+    setup_system_clock(&p);
 
-    // Setup peripherals and managers
+    // Enable peripheral clocks
+    enable_peripherals(&p);
+
+    // Setup SysTick
+    systick::setup_systick(&mut cp.SYST);
     let start_time = systick::get_tick_ms();
-    systick::setup_systick(&mut core_peripherals.SYST);
 
-    let mut leds = Leds::new(&peripherals);
-    let mut uart = UartManager::new(&peripherals);
+    // Setup GPIO pins
+    setup_gpio_pins(&p);
+
+    // Initialize peripherals
+    let mut leds = Leds::new(&p);
+    let mut uart = UartManager::new(&p);
     let mut xmodem = XmodemManager::new();
 
-    // Initialize peripherals and show welcome message
     leds.init();
     uart.init();
     
     // Blink all LEDs to indicate bootloader started
-    leds.toggle_all();
+    leds.set_all(true);
     
     uart.send_string("\r\n****************************************\r\n");
     uart.send_string("*            Bootloader v1.0.0           *\r\n");
     uart.send_string("****************************************\r\n\r\n");
     uart.send_string("Press 'U' to enter updater\r\n");
     uart.send_string("Press 'F' to update firmware using XMODEM\r\n");
-    uart.send_string("Press 'A' to update application\r\n");
+    uart.send_string("Press 'A' to boot application\r\n");
     uart.send_string("Press 'Enter' to boot application\r\n");
     uart.send_string("Will boot automatically in 10 seconds...\r\n");
 
-    // Enable interrupts
+    // Enable USART2 interrupt in NVIC
     unsafe {
         cortex_m::peripheral::NVIC::unmask(pac::Interrupt::USART2);
     }
@@ -80,6 +86,12 @@ fn main() -> ! {
     let mut firmware_target = APP_ADDR;
 
     loop {
+        // Toggle LED to show we're alive
+        leds.toggle(1);
+        
+        // Wait a bit
+        systick::wait_ms(systick::get_tick_ms(), 500);
+        
         // Process UART data
         uart.process();
 
@@ -236,14 +248,14 @@ fn main() -> ! {
                 while !uart.is_tx_complete() {
                     uart.process();
                 }
-                boot_application(&peripherals, &mut core_peripherals);
+                boot_application(&p, &mut cp);
             },
             BootOption::Updater => {
                 // Wait for UART to finish sending
                 while !uart.is_tx_complete() {
                     uart.process();
                 }
-                boot_updater(&peripherals, &mut core_peripherals);
+                boot_updater(&p, &mut cp);
             },
             _ => {}
         }
@@ -260,19 +272,65 @@ fn main() -> ! {
                         uart.process();
                     }
                     
-                    boot_application(&peripherals, &mut core_peripherals);
+                    boot_application(&p, &mut cp);
                 } else {
                     uart.send_string("\r\nAuto-boot timeout reached but no valid application found.\r\n");
                     uart.send_string("Please flash a valid application image.\r\n");
                     // Reset the timeout
-                    let start_time = systick::get_tick_ms();
+                    //start_time = systick::get_tick_ms();
                 }
             }
         }
 
         // Wait for interrupt (power saving)
-        asm::wfi();
+        //asm::wfi();
     }
+}
+
+/// Enable peripheral clocks
+fn enable_peripherals(p: &Peripherals) {
+    // Enable GPIO clocks
+    p.rcc.ahb1enr().modify(|_, w| {
+        w.gpioaen().enabled()  // For USART2 pins
+         .gpioden().enabled()  // For LEDs
+    });
+    
+    // Enable USART2 clock
+    p.rcc.apb1enr().modify(|_, w| {
+        w.usart2en().enabled()
+    });
+    
+    // Enable SYSCFG clock (needed for bootloader)
+    p.rcc.apb2enr().modify(|_, w| {
+        w.syscfgen().enabled()
+    });
+}
+
+/// Setup GPIO pins for UART and LEDs
+fn setup_gpio_pins(p: &Peripherals) {
+    // Configure GPIOA for USART2 (PA2 = TX, PA3 = RX)
+    p.gpioa.moder().modify(|_, w| {
+        w.moder2().alternate()  // TX pin
+         .moder3().alternate()  // RX pin
+    });
+    
+    // Set alternate function 7 (USART2) for PA2 and PA3
+    p.gpioa.afrl().modify(|_, w| {
+        w.afrl2().af7()  // TX pin
+         .afrl3().af7()  // RX pin
+    });
+    
+    // Set high speed mode
+    p.gpioa.ospeedr().modify(|_, w| {
+        w.ospeedr2().high_speed()
+         .ospeedr3().high_speed()
+    });
+    
+    // No pull-up/pull-down
+    p.gpioa.pupdr().modify(|_, w| {
+        w.pupdr2().floating()
+         .pupdr3().floating()
+    });
 }
 
 fn setup_system_clock(p: &pac::Peripherals) {

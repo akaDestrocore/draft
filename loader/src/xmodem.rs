@@ -1,4 +1,3 @@
-use core::time::Duration;
 use misc::{flash, systick};
 use stm32f4 as pac;
 
@@ -32,7 +31,7 @@ pub enum XmodemError {
     FlashWriteError,
 }
 
-/// CRC16 calculation for XMODEM protocol
+/// CRC16 calculation for XMODEM protocol (CCITT)
 fn calculate_crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0;
     
@@ -63,6 +62,7 @@ pub struct XmodemManager {
     response: Option<u8>,
     retries: u8,
     transfer_started: bool,
+    last_erase_sector: u32,
 }
 
 impl XmodemManager {
@@ -79,6 +79,7 @@ impl XmodemManager {
             response: None,
             retries: 0,
             transfer_started: false,
+            last_erase_sector: 0,
         }
     }
 
@@ -93,11 +94,17 @@ impl XmodemManager {
         self.response = Some(C); // Send initial 'C'
         self.retries = 0;
         self.transfer_started = false;
+        self.last_erase_sector = 0;
         
         // We're starting a transfer - let's erase the first sector
-        let sector_erased = unsafe { flash::erase_sector(&pac::Peripherals::steal(), address) };
+        let sector_erased = unsafe { 
+            flash::erase_sector(&pac::Peripherals::steal(), address) 
+        };
+        
         if sector_erased == 0 {
             self.state = XmodemState::Error;
+        } else {
+            self.last_erase_sector = address;
         }
     }
 
@@ -150,35 +157,17 @@ impl XmodemManager {
                     self.state = XmodemState::ReceiveData;
                     self.transfer_started = true;
                     Ok(true)
+                } else if byte == EOT {
+                    // End of transmission
+                    self.state = XmodemState::FinishTransfer;
+                    self.response = Some(ACK);
+                    Err(XmodemError::TransferComplete)
                 } else if byte == CAN {
                     // Cancelled by sender
                     self.state = XmodemState::Idle;
                     Err(XmodemError::Cancelled)
                 } else {
                     // Ignore other bytes
-                    Ok(false)
-                }
-            },
-
-            XmodemState::WaitForHeader => {
-                if byte == SOH {
-                    self.buffer[0] = byte;
-                    self.buffer_index = 1;
-                    self.packet_size = 128;
-                    self.state = XmodemState::ReceiveData;
-                    self.transfer_started = true;
-                    Ok(true)
-                } else if byte == STX {
-                    self.buffer[0] = byte;
-                    self.buffer_index = 1;
-                    self.packet_size = 1024;
-                    self.state = XmodemState::ReceiveData;
-                    self.transfer_started = true;
-                    Ok(true)
-                } else if byte == CAN {
-                    self.state = XmodemState::Idle;
-                    Err(XmodemError::Cancelled)
-                } else {
                     Ok(false)
                 }
             },
@@ -253,19 +242,29 @@ impl XmodemManager {
                     
                     // Check if we need to erase next flash sector
                     let next_address = self.current_address + self.packet_size as u32;
-                    if (next_address & 0xFFFF) < (self.current_address & 0xFFFF) {
-                        // Crossing a 64KB boundary, need to erase next sector
-                        let sector_erased = unsafe { flash::erase_sector(&pac::Peripherals::steal(), next_address) };
+                    let current_sector = self.current_address & 0xFF000000 | (self.current_address & 0x00FF0000);
+                    let next_sector = next_address & 0xFF000000 | (next_address & 0x00FF0000);
+                    
+                    if current_sector != next_sector && next_sector != self.last_erase_sector {
+                        // Need to erase a new sector
+                        let sector_erased = unsafe { 
+                            flash::erase_sector(&pac::Peripherals::steal(), next_sector) 
+                        };
+                        
                         if sector_erased == 0 {
                             self.state = XmodemState::Error;
                             return Err(XmodemError::FlashWriteError);
                         }
+                        
+                        self.last_erase_sector = next_sector;
                     }
                     
                     // Write to flash
-                    let write_result = unsafe { flash::write(&pac::Peripherals::steal(), 
-                                                 &self.buffer[3..3 + self.packet_size], 
-                                                 self.current_address)};
+                    let write_result = unsafe { 
+                        flash::write(&pac::Peripherals::steal(), 
+                                    &self.buffer[3..3 + self.packet_size], 
+                                    self.current_address)
+                    };
                     
                     if write_result != 0 {
                         // Flash write error
