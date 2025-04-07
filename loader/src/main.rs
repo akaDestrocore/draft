@@ -270,6 +270,20 @@ fn main() -> ! {
                         // Red LED on to indicate flash error
                         leds.set(2, true);
                     },
+                    Err(XmodemError::InvalidMagic) => {
+                        uart.send_string("\r\nInvalid firmware image magic number.\r\n");
+                        update_in_progress = false;
+                        
+                        // Red LED on to indicate invalid firmware
+                        leds.set(2, true);
+                    },
+                    Err(XmodemError::OlderVersion) => {
+                        uart.send_string("\r\nFirmware version is older than currently installed.\r\n");
+                        update_in_progress = false;
+                        
+                        // Red LED on to indicate version error
+                        leds.set(2, true);
+                    },
                 }
             }
             
