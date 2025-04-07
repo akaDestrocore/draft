@@ -7,7 +7,7 @@ pub struct Leds<'a> {
 impl<'a> Leds<'a> {
     pub fn new(p: &'a pac::Peripherals) -> Self {
         Self {
-            gpiod: &*p.gpiod.moder().as_ptr().cast::<pac::gpiod::RegisterBlock>(),
+            gpiod: unsafe { &*p.gpiod.moder().as_ptr().cast::<pac::gpiod::RegisterBlock>() },
         }
     }
 
@@ -53,26 +53,26 @@ impl<'a> Leds<'a> {
     pub fn set(&mut self, led: u8, state: bool) {
         unsafe {
             match (led, state) {
-                (0, true)  => self.gpiod.bsrr().write(|w| w.bs12().set_bit()),
-                (0, false) => self.gpiod.bsrr().write(|w| w.br12().set_bit()),
-                (1, true)  => self.gpiod.bsrr().write(|w| w.bs13().set_bit()),
-                (1, false) => self.gpiod.bsrr().write(|w| w.br13().set_bit()),
-                (2, true)  => self.gpiod.bsrr().write(|w| w.bs14().set_bit()),
-                (2, false) => self.gpiod.bsrr().write(|w| w.br14().set_bit()),
-                (3, true)  => self.gpiod.bsrr().write(|w| w.bs15().set_bit()),
-                (3, false) => self.gpiod.bsrr().write(|w| w.br15().set_bit()),
+                (0, true)  => { let _ = self.gpiod.bsrr().write(|w| w.bs12().set_bit()); }
+                (0, false) => { let _ = self.gpiod.bsrr().write(|w| w.br12().set_bit()); }
+                (1, true)  => { let _ = self.gpiod.bsrr().write(|w| w.bs13().set_bit()); }
+                (1, false) => { let _ = self.gpiod.bsrr().write(|w| w.br13().set_bit()); }
+                (2, true)  => { let _ = self.gpiod.bsrr().write(|w| w.bs14().set_bit()); }
+                (2, false) => { let _ = self.gpiod.bsrr().write(|w| w.br14().set_bit()); }
+                (3, true)  => { let _ = self.gpiod.bsrr().write(|w| w.bs15().set_bit()); }
+                (3, false) => { let _ = self.gpiod.bsrr().write(|w| w.br15().set_bit()); }
                 _ => {}
             }
         }
     }
-
+    
     pub fn toggle(&mut self, led: u8) {
         unsafe {
             match led {
-                0 => self.gpiod.odr().modify(|r, w| w.odr12().bit(!r.odr12().bit())),
-                1 => self.gpiod.odr().modify(|r, w| w.odr13().bit(!r.odr13().bit())),
-                2 => self.gpiod.odr().modify(|r, w| w.odr14().bit(!r.odr14().bit())),
-                3 => self.gpiod.odr().modify(|r, w| w.odr15().bit(!r.odr15().bit())),
+                0 => { let _ = self.gpiod.odr().modify(|r, w| w.odr12().bit(!r.odr12().bit())); }
+                1 => { let _ = self.gpiod.odr().modify(|r, w| w.odr13().bit(!r.odr13().bit())); }
+                2 => { let _ = self.gpiod.odr().modify(|r, w| w.odr14().bit(!r.odr14().bit())); }
+                3 => { let _ = self.gpiod.odr().modify(|r, w| w.odr15().bit(!r.odr15().bit())); }
                 _ => {}
             }
         }

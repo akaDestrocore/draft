@@ -95,7 +95,7 @@ impl XmodemManager {
         self.transfer_started = false;
         
         // We're starting a transfer - let's erase the first sector
-        let sector_erased = flash::erase_sector(&pac::Peripherals::steal(), address);
+        let sector_erased = unsafe { flash::erase_sector(&pac::Peripherals::steal(), address) };
         if sector_erased == 0 {
             self.state = XmodemState::Error;
         }
@@ -156,6 +156,29 @@ impl XmodemManager {
                     Err(XmodemError::Cancelled)
                 } else {
                     // Ignore other bytes
+                    Ok(false)
+                }
+            },
+
+            XmodemState::WaitForHeader => {
+                if byte == SOH {
+                    self.buffer[0] = byte;
+                    self.buffer_index = 1;
+                    self.packet_size = 128;
+                    self.state = XmodemState::ReceiveData;
+                    self.transfer_started = true;
+                    Ok(true)
+                } else if byte == STX {
+                    self.buffer[0] = byte;
+                    self.buffer_index = 1;
+                    self.packet_size = 1024;
+                    self.state = XmodemState::ReceiveData;
+                    self.transfer_started = true;
+                    Ok(true)
+                } else if byte == CAN {
+                    self.state = XmodemState::Idle;
+                    Err(XmodemError::Cancelled)
+                } else {
                     Ok(false)
                 }
             },
@@ -232,7 +255,7 @@ impl XmodemManager {
                     let next_address = self.current_address + self.packet_size as u32;
                     if (next_address & 0xFFFF) < (self.current_address & 0xFFFF) {
                         // Crossing a 64KB boundary, need to erase next sector
-                        let sector_erased = flash::erase_sector(&pac::Peripherals::steal(), next_address);
+                        let sector_erased = unsafe { flash::erase_sector(&pac::Peripherals::steal(), next_address) };
                         if sector_erased == 0 {
                             self.state = XmodemState::Error;
                             return Err(XmodemError::FlashWriteError);
@@ -240,9 +263,9 @@ impl XmodemManager {
                     }
                     
                     // Write to flash
-                    let write_result = flash::write(&pac::Peripherals::steal(), 
+                    let write_result = unsafe { flash::write(&pac::Peripherals::steal(), 
                                                  &self.buffer[3..3 + self.packet_size], 
-                                                 self.current_address);
+                                                 self.current_address)};
                     
                     if write_result != 0 {
                         // Flash write error

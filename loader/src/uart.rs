@@ -21,7 +21,7 @@ pub struct UartManager<'a> {
 impl<'a> UartManager<'a> {
     pub fn new(p: &'a pac::Peripherals) -> Self {
         Self {
-            usart2: &*p.usart2.brr().as_ptr().cast::<pac::usart1::RegisterBlock>(),
+            usart2: unsafe { &*p.usart2.brr().as_ptr().cast::<pac::usart1::RegisterBlock>() },
         }
     }
 
