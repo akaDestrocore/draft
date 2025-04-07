@@ -159,6 +159,7 @@ fn main() -> ! {
                         uart.send_string("\r\n--- System Diagnostics ---\r\n");
                         let state_str = match xmodem.get_state() {
                             XmodemState::Idle => "Idle",
+                            XmodemState::SendingInitialC => "SendingInitialC",
                             XmodemState::WaitingForData => "WaitingForData",
                             XmodemState::ReceivingData => "ReceivingData",
                             XmodemState::Error => "Error",
