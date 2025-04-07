@@ -162,6 +162,7 @@ fn main() -> ! {
                             XmodemState::SendingInitialC => "SendingInitialC",
                             XmodemState::WaitingForData => "WaitingForData",
                             XmodemState::ReceivingData => "ReceivingData",
+                            XmodemState::ProcessingPacket => "ProcessingPacket",
                             XmodemState::Error => "Error",
                             XmodemState::Complete => "Complete",
                         };
