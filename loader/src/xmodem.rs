@@ -1,5 +1,5 @@
 use core::{mem, ptr::addr_eq};
-use cortex_m::peripheral;
+use cortex_m::{peripheral, asm};
 use misc::{
     flash,
     systick,
@@ -61,6 +61,12 @@ pub struct XmodemManager {
     retries: u8,
     first_packet_processed: bool,
     current_sector_base: u32,
+}
+
+#[inline(never)]
+fn breakpoint_anchor <T>(val:T) {
+    let _ = val;
+    asm::nop();
 }
 
 impl XmodemManager {
@@ -247,6 +253,8 @@ impl XmodemManager {
             return Err(XmodemError::CrcError);
         }
         
+        breakpoint_anchor(1);
+
         // For the very first packet we need to check magic and version first
         if packet_num == 1 && !self.first_packet_processed {
             let mut data_copy = [0u8; DATA_SIZE];
@@ -258,7 +266,7 @@ impl XmodemManager {
             }
         } else {
             // check if we need to erase the next sector
-            let next_addr = self.current_addr + DATA_SIZE as u32;
+            let next_addr: u32 = self.current_addr + DATA_SIZE as u32;
             let current_sector_end: u32 = self.current_sector_base + 0x20000;
             
             if next_addr > current_sector_end {
@@ -291,7 +299,7 @@ impl XmodemManager {
             // Update current address
             self.current_addr += DATA_SIZE as u32;
         }
-        
+
         // success
         self.state = XmodemState::WaitingForData;
         self.buffer_index = 0;
@@ -299,7 +307,6 @@ impl XmodemManager {
         self.packet_count += 1;
         self.next_byte_to_send = Some(ACK);
         self.last_poll_time = systick::get_tick_ms();
-        
         Ok(true) // Need to send ACK
     }
 
@@ -309,7 +316,7 @@ impl XmodemManager {
             self.state = XmodemState::Error;
             return Err(XmodemError::InvalidPacket);
         }
-        
+
         let header: &ImageHeader = unsafe {
             let header_ptr: *const ImageHeader = data.as_ptr() as *const ImageHeader;
             &*header_ptr
