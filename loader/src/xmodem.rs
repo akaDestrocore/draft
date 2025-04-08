@@ -14,7 +14,7 @@ pub const ACK: u8 = 0x06;
 pub const NAK: u8 = 0x15;
 pub const CAN: u8 = 0x18;
 pub const X_C: u8 = 0x43;
-pub const PAD_BYTE: u8 = 0x1A; // XMODEM padding byte
+pub const PAD_BYTE: u8 = 0x1A;
 
 // Timeout values in millis
 const PACKET_TIMEOUT_MS: u32 = 5000; // 5 sec for each packet
@@ -65,7 +65,7 @@ pub struct XmodemManager {
     total_data_received: u32,
     actual_firmware_size: Option<u32>,
     header_size: u32,
-    received_eot: bool,    // Флаг, указывающий, что получен EOT (последний пакет был принят)
+    received_eot: bool,
 }
 
 #[inline(never)]
@@ -360,7 +360,7 @@ impl XmodemManager {
         self.packet_count += 1;
         self.next_byte_to_send = Some(ACK);
         self.last_poll_time = systick::get_tick_ms();
-        Ok(true) // Need to send ACK
+        Ok(true)
     }
 
     fn find_useful_bytes_in_packet(&self, data: &[u8]) -> usize {

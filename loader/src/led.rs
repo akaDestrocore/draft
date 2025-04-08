@@ -12,9 +12,7 @@ impl<'a> Leds<'a> {
     }
 
     pub fn init(&mut self) {
-        // Configure PD12-PD15 as outputs (green, orange, red, blue LEDs)
         unsafe {
-            // Configure mode register for PD12-PD15 as output (01)
             self.gpiod.moder().modify(|_, w| {
                 w.moder12().output()
                  .moder13().output()
@@ -22,7 +20,6 @@ impl<'a> Leds<'a> {
                  .moder15().output()
             });
             
-            // Configure output type register as push-pull
             self.gpiod.otyper().modify(|_, w| {
                 w.ot12().push_pull()
                  .ot13().push_pull()
@@ -30,7 +27,6 @@ impl<'a> Leds<'a> {
                  .ot15().push_pull()
             });
             
-            // Configure output speed as low (00)
             self.gpiod.ospeedr().modify(|_, w| {
                 w.ospeedr12().low_speed()
                  .ospeedr13().low_speed()
@@ -38,7 +34,6 @@ impl<'a> Leds<'a> {
                  .ospeedr15().low_speed()
             });
             
-            // Turn off all LEDs initially
             self.gpiod.bsrr().write(|w| {
                 w.br12().set_bit()
                  .br13().set_bit()
@@ -80,7 +75,7 @@ impl<'a> Leds<'a> {
         unsafe {
             match led {
                 0 => {
-                    let current = self.gpiod.odr().read().odr12().bit();
+                    let current: bool = self.gpiod.odr().read().odr12().bit();
                     if current {
                         self.gpiod.bsrr().write(|w| w.br12().set_bit());
                     } else {
@@ -88,7 +83,7 @@ impl<'a> Leds<'a> {
                     }
                 },
                 1 => {
-                    let current = self.gpiod.odr().read().odr13().bit();
+                    let current: bool = self.gpiod.odr().read().odr13().bit();
                     if current {
                         self.gpiod.bsrr().write(|w| w.br13().set_bit());
                     } else {
@@ -96,7 +91,7 @@ impl<'a> Leds<'a> {
                     }
                 },
                 2 => {
-                    let current = self.gpiod.odr().read().odr14().bit();
+                    let current: bool = self.gpiod.odr().read().odr14().bit();
                     if current {
                         self.gpiod.bsrr().write(|w| w.br14().set_bit());
                     } else {
@@ -104,7 +99,7 @@ impl<'a> Leds<'a> {
                     }
                 },
                 3 => {
-                    let current = self.gpiod.odr().read().odr15().bit();
+                    let current: bool = self.gpiod.odr().read().odr15().bit();
                     if current {
                         self.gpiod.bsrr().write(|w| w.br15().set_bit());
                     } else {
