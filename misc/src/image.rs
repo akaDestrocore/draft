@@ -70,6 +70,11 @@ impl ImageHeader {
         
         self.version_patch > other.version_patch
     }
+    
+    /// Update data size field in the header
+    pub fn update_data_size(&mut self, size: u32) {
+        self.data_size = size;
+    }
 }
 
 // Shared memory

@@ -14,6 +14,7 @@ pub const ACK: u8 = 0x06;
 pub const NAK: u8 = 0x15;
 pub const CAN: u8 = 0x18;
 pub const X_C: u8 = 0x43;
+pub const PAD_BYTE: u8 = 0x1A; // XMODEM padding byte
 
 // Timeout values in millis
 const PACKET_TIMEOUT_MS: u32 = 5000; // 5 sec for each packet
@@ -61,6 +62,10 @@ pub struct XmodemManager {
     retries: u8,
     first_packet_processed: bool,
     current_sector_base: u32,
+    total_data_received: u32,
+    actual_firmware_size: Option<u32>,
+    header_size: u32,
+    received_eot: bool,    // Флаг, указывающий, что получен EOT (последний пакет был принят)
 }
 
 #[inline(never)]
@@ -86,6 +91,10 @@ impl XmodemManager {
             retries: 0,
             first_packet_processed: false,
             current_sector_base: 0,
+            total_data_received: 0,
+            actual_firmware_size: None,
+            header_size: mem::size_of::<ImageHeader>() as u32,
+            received_eot: false,
         }
     }
 
@@ -100,6 +109,9 @@ impl XmodemManager {
         self.first_packet_processed = false;
         self.next_byte_to_send = Some(X_C); 
         self.last_poll_time = systick::get_tick_ms();
+        self.total_data_received = 0;
+        self.actual_firmware_size = None;
+        self.received_eot = false;
 
         if addr == crate::APP_ADDR {
             self.expected_magic = IMAGE_MAGIC_APP;
@@ -179,8 +191,19 @@ impl XmodemManager {
                         Ok(false)
                     },
                     EOT => {
+                        // set EOT received because this is the last packet
+                        self.received_eot = true;
                         self.state = XmodemState::Complete;
                         self.next_byte_to_send = Some(ACK);
+                        
+                        // if we have size info from header then we just cut unnecessary stuff
+                        if let Some(firmware_size) = self.actual_firmware_size {
+                            if self.current_addr > self.target_addr + firmware_size {
+                                // set the correct addr for end of the firmware
+                                self.current_addr = self.target_addr + firmware_size;
+                            }
+                        }
+                        
                         Err(XmodemError::TransferComplete)
                     },
                     CAN => {
@@ -252,10 +275,8 @@ impl XmodemManager {
             self.next_byte_to_send = Some(NAK);
             return Err(XmodemError::CrcError);
         }
-        
-        breakpoint_anchor(1);
 
-        // For the very first packet we need to check magic and version first
+        // check header and parse size oout of the first packet
         if packet_num == 1 && !self.first_packet_processed {
             let mut data_copy = [0u8; DATA_SIZE];
             data_copy.copy_from_slice(&self.buffer[3..3+DATA_SIZE]);
@@ -265,11 +286,40 @@ impl XmodemManager {
                 return result;
             }
         } else {
-            // check if we need to erase the next sector
-            let next_addr: u32 = self.current_addr + DATA_SIZE as u32;
+            // calculate useful bytes
+            let data = &self.buffer[3..3+DATA_SIZE];
+            let mut useful_bytes: usize = self.find_useful_bytes_in_packet(data);
+            
+            if useful_bytes == 0 {
+                self.state = XmodemState::WaitingForData;
+                self.buffer_index = 0;
+                self.expected_packet_num = self.expected_packet_num.wrapping_add(1);
+                self.packet_count += 1;
+                self.next_byte_to_send = Some(ACK);
+                self.last_poll_time = systick::get_tick_ms();
+                return Ok(true);
+            }
+            
+            self.total_data_received += useful_bytes as u32;
+            
+            // check for size overflow
+            if let Some(firmware_size) = self.actual_firmware_size {
+                if self.total_data_received > firmware_size {
+                    let excess: u32 = self.total_data_received - firmware_size;
+                    if excess < useful_bytes as u32 {
+                        let adjusted_bytes: u32 = useful_bytes as u32 - excess;
+                        useful_bytes = adjusted_bytes as usize;
+                        self.total_data_received = firmware_size;
+                    } else {
+                        useful_bytes = 0;
+                    }
+                }
+            }
+            
+            let next_addr: u32 = self.current_addr + useful_bytes as u32;
             let current_sector_end: u32 = self.current_sector_base + 0x20000;
             
-            if next_addr > current_sector_end {
+            if next_addr > current_sector_end && useful_bytes > 0 {
                 let peripherals: stm32f4::Peripherals = unsafe { pac::Peripherals::steal() };
                 let next_sector_base: u32 = self.current_sector_base + 0x20000;
                 
@@ -284,20 +334,23 @@ impl XmodemManager {
                 }
             }
             
-            // write data to flash
-            let mut data_copy = [0u8; DATA_SIZE];
-            data_copy.copy_from_slice(&self.buffer[3..3+DATA_SIZE]);
-            
-            let peripherals: stm32f4::Peripherals = unsafe { pac::Peripherals::steal() };
-            let result: u8 = flash::write(&peripherals, &data_copy, self.current_addr);
-            
-            if result != 0 {
-                self.state = XmodemState::Error;
-                return Err(XmodemError::FlashWriteError);
+            // write to flash only useful bytes
+            if useful_bytes > 0 {
+                let peripherals: stm32f4::Peripherals = unsafe { pac::Peripherals::steal() };
+
+                let mut data_to_write = [0u8; DATA_SIZE];
+                data_to_write[..useful_bytes].copy_from_slice(&self.buffer[3..3 + useful_bytes]);
+                
+                // write 
+                let result: u8 = flash::write(&peripherals, &data_to_write[..useful_bytes], self.current_addr);
+                
+                if result != 0 {
+                    self.state = XmodemState::Error;
+                    return Err(XmodemError::FlashWriteError);
+                }
+                
+                self.current_addr += useful_bytes as u32;
             }
-            
-            // Update current address
-            self.current_addr += DATA_SIZE as u32;
         }
 
         // success
@@ -308,6 +361,42 @@ impl XmodemManager {
         self.next_byte_to_send = Some(ACK);
         self.last_poll_time = systick::get_tick_ms();
         Ok(true) // Need to send ACK
+    }
+
+    fn find_useful_bytes_in_packet(&self, data: &[u8]) -> usize {
+        let mut padding_start: usize = data.len();
+
+        let mut is_all_padding: bool = true;
+        for &byte in data {
+            if byte != PAD_BYTE {
+                is_all_padding = false;
+                break;
+            }
+        }
+        
+        if is_all_padding {
+            return 0;
+        }
+        
+        for i in (0..data.len()).rev() {
+            if data[i] != PAD_BYTE {
+                padding_start = i + 1;
+                break;
+            }
+        }
+        
+        if data.len() - padding_start >= 8 {
+            return padding_start;
+        }
+        
+
+        for i in padding_start..data.len() {
+            if data[i] != PAD_BYTE {
+                return data.len(); // no padding
+            }
+        }
+        
+        data.len()
     }
 
     fn process_first_packet(&mut self, data: &[u8]) -> Result<bool, XmodemError> {
@@ -334,6 +423,13 @@ impl XmodemManager {
             return Err(XmodemError::InvalidMagic);
         }
         
+        // if no size value in header then we use hardcoded size
+        self.actual_firmware_size = if header.data_size > 0 {
+            Some(header.data_size + self.header_size)
+        } else {
+            Some(0x40000) // 256 kB
+        };
+        
         // Compare versions
         let current_header_addr: *const ImageHeader = self.target_addr as *const ImageHeader;
         let current_header: Option<&ImageHeader> = unsafe { 
@@ -354,15 +450,24 @@ impl XmodemManager {
         
         // Write the first packet data to flash
         let peripherals: stm32f4::Peripherals = unsafe { pac::Peripherals::steal() };
-        let result: u8 = flash::write(&peripherals, data, self.current_addr);
+        
+        let useful_bytes: usize = self.find_useful_bytes_in_packet(data);
+        
+        let mut data_to_write = [0u8; DATA_SIZE];
+        data_to_write[..useful_bytes].copy_from_slice(&data[..useful_bytes]);
+        
+        // write
+        let result: u8 = flash::write(&peripherals, &data_to_write[..useful_bytes], self.current_addr);
         
         if result != 0 {
             self.state = XmodemState::Error;
             return Err(XmodemError::FlashWriteError);
         }
         
+        self.total_data_received = useful_bytes as u32;
+        
         // Update current address for next packet
-        self.current_addr += DATA_SIZE as u32;
+        self.current_addr += useful_bytes as u32;
         self.first_packet_processed = true;
         
         Ok(true)

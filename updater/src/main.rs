@@ -7,10 +7,14 @@ use cortex_m_rt::entry;
 use stm32f4 as pac;
 use misc::image::{ImageHeader, SharedMemory, IMAGE_MAGIC_UPDATER, IMAGE_TYPE_UPDATER};
 
+// Символы, определенные в линкер-скрипте
+extern "C" {
+    static __firmware_size: u32;
+}
 
 #[no_mangle]
 #[link_section = ".image_hdr"]
-pub static IMAGE_HEADER: ImageHeader = ImageHeader::new(
+pub static mut IMAGE_HEADER: ImageHeader = ImageHeader::new(
     IMAGE_TYPE_UPDATER,
     IMAGE_MAGIC_UPDATER,
     1, 0, 0  // ver 1.0.0
@@ -18,6 +22,17 @@ pub static IMAGE_HEADER: ImageHeader = ImageHeader::new(
 
 #[entry]
 fn main() -> ! {
+    // Получаем размер прошивки из символа, определенного линкером
+    let firmware_size = unsafe {
+        let size = &__firmware_size as *const u32;
+        let size_value = *size;
+        
+        // Обновляем размер в заголовке
+        IMAGE_HEADER.update_data_size(size_value);
+        
+        size_value
+    };
+
     // PD13 init 
     let peripherals: stm32f4::Peripherals = unsafe { pac::Peripherals::steal() };
     

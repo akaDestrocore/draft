@@ -11,5 +11,9 @@ SECTIONS
         KEEP(*(.shared_memory));
         . = ALIGN(4);
     } > RAM2
+    
+    __firmware_start = LOADADDR(.text);
+    __firmware_end = LOADADDR(.text) + SIZEOF(.text) + SIZEOF(.rodata) + SIZEOF(.data);
 }
 
+__firmware_size = __firmware_end - __firmware_start;
