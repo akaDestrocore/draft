@@ -24,7 +24,9 @@ use xmodem::{XmodemManager, XmodemError, XmodemState};
 pub const UPDATER_ADDR: u32 = 0x08008000;
 pub const APP_ADDR: u32 = 0x08020000;
 pub const IMAGE_HDR_SIZE: u32 = 0x200;
-pub const BOOT_TIMEOUT_MS: u32 = 10_000; // 10 seconds
+pub const BOOT_TIMEOUT_MS: u32 = 10_000;
+
+static mut AUTO_BOOT_DISABLED: bool = false;
 
 #[no_mangle]
 #[link_section = ".shared_memory"]
@@ -35,8 +37,39 @@ pub static mut SHARED_MEMORY: SharedMemory = SharedMemory::new();
 pub static IMAGE_HEADER: ImageHeader = ImageHeader::new(
     IMAGE_TYPE_LOADER,
     IMAGE_MAGIC_LOADER,
-    1, 0, 0  // ver 1.0.0
+    1, 0, 0
 );
+
+// Функция для отображения меню
+fn display_menu(uart: &mut UartManager) {
+    // uart.send_string("\r\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n");
+    // uart.send_string("xxxxxxxx  xxxxxxxxxxxxxxxxxxxx  xxxxxxxxx\r\n");
+    // uart.send_string("xxxxxxxxxx  xxxxxxxxxxxxxxxxx  xxxxxxxxxx\r\n");
+    // uart.send_string("xxxxxx  xxx  xxxxxxxxxxxxxxx  xx   xxxxxx\r\n");
+    // uart.send_string("xxxxxxxx  xx  xxxxxxxxxxxxx  xx  xxxxxxxx\r\n");
+    // uart.send_string("xxxx  xxx   xxxxxxxxxxxxxxxxx  xxx  xxxxx\r\n");
+    // uart.send_string("xxxxxx    xxxx  xxxxxxxx  xxx     xxxxxxx\r\n");
+    // uart.send_string("xxxxxxxx xxxxx xx      xx xxxx  xxxxxxxxx\r\n");
+    // uart.send_string("xxxx     xxxxx   xx  xx   xxxxx     xxxxx\r\n");
+    // uart.send_string("xxxxxxxx xxxxxxxxxx  xxxxxxxxxx  xxxxxxxx\r\n");
+    // uart.send_string("xxxxx    xxxxxx  xx  xx  xxxxxx    xxxxxx\r\n");
+    // uart.send_string("xxxxxxxx  xxxx xxxx  xxxx xxxxx xxxxxxxxx\r\n");
+    // uart.send_string("xxxxxxx    xxx  xxx  xxx  xxx    xxxxxxxx\r\n");
+    // uart.send_string("xxxxxxxxxx   xxxxxx  xxxxxx   xxxxxxxxxxx\r\n");
+    // uart.send_string("xxxxxxxxxxxxxx             xxxxxxxxxxxxxx\r\n");
+    // uart.send_string("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n");
+    uart.send_string("Press 'U' to enter updater\r\n");
+    uart.send_string("Press 'F' to update firmware using XMODEM\r\n");
+    uart.send_string("Press 'A' to boot application\r\n");
+    uart.send_string("Press 'Enter' to boot application\r\n");
+    
+    let auto_boot_enabled: bool = unsafe { !AUTO_BOOT_DISABLED };
+    if auto_boot_enabled {
+        uart.send_string("Will boot automatically in 10 seconds\r\n");
+    } else {
+        uart.send_string("Auto-boot is disabled\r\n");
+    }
+}
 
 #[entry]
 fn main() -> ! {
@@ -69,14 +102,8 @@ fn main() -> ! {
     systick::wait_ms(systick::get_tick_ms(), 500);
     leds.set_all(false);
     
-    uart.send_string("\r\n****************************************\r\n");
-    uart.send_string("*            Bootloader v1.0.0           *\r\n");
-    uart.send_string("****************************************\r\n\r\n");
-    uart.send_string("Press 'U' to enter updater\r\n");
-    uart.send_string("Press 'F' to update firmware using XMODEM\r\n");
-    uart.send_string("Press 'A' to boot application\r\n");
-    uart.send_string("Press 'Enter' to boot application\r\n");
-    uart.send_string("Will boot automatically in 10 seconds...\r\n");
+    // Показываем меню
+    display_menu(&mut uart);
 
     // Enable USART2 interrupt in NVIC
     unsafe {
@@ -112,6 +139,9 @@ fn main() -> ! {
         // Handle user input if not in update mode
         if !update_in_progress {
             if let Some(byte) = uart.read_byte() {
+
+                unsafe { AUTO_BOOT_DISABLED = true; }
+                
                 match byte {
                     b'U' | b'u' => {
                         // Boot updater
@@ -187,6 +217,12 @@ fn main() -> ! {
                         uart.send_string("Updater valid: ");
                         uart.send_string(if bootloader::is_firmware_valid(UPDATER_ADDR) { "Yes" } else { "No" });
                         uart.send_string("\r\n");
+                        
+                        uart.send_string("Auto-boot enabled: ");
+                        unsafe {
+                            uart.send_string(if AUTO_BOOT_DISABLED { "No" } else { "Yes" });
+                        }
+                        uart.send_string("\r\n");
                     },
                     b'\r' | b'\n' => {
                         // Boot application
@@ -224,7 +260,7 @@ fn main() -> ! {
                                     boot_option = BootOption::None;
                                 }
                             } else {
-                                uart.send_string("\r\nInvalid option, try again.\r\n");
+                                uart.send_string("\r\nAuto-boot disabled. Press 'A' to boot application or 'U' to boot updater.\r\n");
                             }
                         }
                     },
@@ -254,24 +290,41 @@ fn main() -> ! {
                         uart.send_string("\r\nTransfer complete! Firmware updated successfully.\r\n");
                         update_in_progress = false;
                         
+                        unsafe { AUTO_BOOT_DISABLED = true; }
+                        
                         // All LEDs on to indicate success
                         leds.set_all(true);
                         systick::wait_ms(systick::get_tick_ms(), 500);
                         leds.set_all(false);
+                        
+                        // Показываем меню снова
+                        display_menu(&mut uart);
                     },
                     Err(XmodemError::Cancelled) => {
                         uart.send_string("\r\nTransfer cancelled.\r\n");
                         update_in_progress = false;
                         
+                        
+                        unsafe { AUTO_BOOT_DISABLED = true; }
+                        
                         // Red LED on to indicate cancellation
                         leds.set(2, true);
+                        
+                        // Показываем меню снова
+                        display_menu(&mut uart);
                     },
                     Err(XmodemError::Timeout) => {
                         uart.send_string("\r\nTransfer timed out.\r\n");
                         update_in_progress = false;
                         
+                        
+                        unsafe { AUTO_BOOT_DISABLED = true; }
+                        
                         // Red LED on to indicate timeout
                         leds.set(2, true);
+                        
+                        // Показываем меню снова
+                        display_menu(&mut uart);
                     },
                     Err(XmodemError::SequenceError) | Err(XmodemError::CrcError) => {
                         // XMODEM will handle retries, we just send responses
@@ -289,22 +342,40 @@ fn main() -> ! {
                         uart.send_string("\r\nError writing to flash memory.\r\n");
                         update_in_progress = false;
                         
+                        
+                        unsafe { AUTO_BOOT_DISABLED = true; }
+                        
                         // Red LED on to indicate flash error
                         leds.set(2, true);
+                        
+                        // Показываем меню снова
+                        display_menu(&mut uart);
                     },
                     Err(XmodemError::InvalidMagic) => {
                         uart.send_string("\r\nInvalid firmware image magic number.\r\n");
                         update_in_progress = false;
                         
+                        
+                        unsafe { AUTO_BOOT_DISABLED = true; }
+                        
                         // Red LED on to indicate invalid firmware
                         leds.set(2, true);
+                        
+                        // Показываем меню снова
+                        display_menu(&mut uart);
                     },
                     Err(XmodemError::OlderVersion) => {
                         uart.send_string("\r\nFirmware version is older than currently installed.\r\n");
                         update_in_progress = false;
                         
+                        
+                        unsafe { AUTO_BOOT_DISABLED = true; }
+                        
                         // Red LED on to indicate version error
                         leds.set(2, true);
+                        
+                        // Показываем меню снова
+                        display_menu(&mut uart);
                     }
                 }
             }
@@ -321,8 +392,14 @@ fn main() -> ! {
                 uart.send_string("\r\nXMODEM transfer error. Aborting.\r\n");
                 update_in_progress = false;
                 
+                
+                unsafe { AUTO_BOOT_DISABLED = true; }
+                
                 // Red LED on to indicate error
                 leds.set(2, true);
+                
+                // Показываем меню снова
+                display_menu(&mut uart);
             }
         }
 
@@ -345,10 +422,13 @@ fn main() -> ! {
             _ => {}
         }
 
-        // Check for auto-boot timeout (only if not updating and no option selected)
+        // Check for auto-boot timeout (только если автозагрузка не отключена)
         if !update_in_progress && boot_option == BootOption::None {
-            let current_time = systick::get_tick_ms();
-            if current_time.wrapping_sub(start_time) >= BOOT_TIMEOUT_MS {
+            let current_time: u32 = systick::get_tick_ms();
+            
+            let auto_boot_enabled: bool = unsafe { !AUTO_BOOT_DISABLED };
+            
+            if auto_boot_enabled && current_time.wrapping_sub(start_time) >= BOOT_TIMEOUT_MS {
                 if bootloader::is_firmware_valid(APP_ADDR) {
                     uart.send_string("\r\nAuto-boot timeout reached. Booting application...\r\n");
                     
@@ -362,8 +442,7 @@ fn main() -> ! {
                     uart.send_string("\r\nAuto-boot timeout reached but no valid application found.\r\n");
                     uart.send_string("Please flash a valid application image.\r\n");
                     
-                    // Reset the timeout to avoid repeating this message
-                    let start_time = current_time;
+                    unsafe { AUTO_BOOT_DISABLED = true; }
                 }
             }
         }
