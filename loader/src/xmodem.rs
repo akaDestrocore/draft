@@ -67,6 +67,8 @@ pub struct XmodemManager {
     header_size: u32,
     received_eot: bool,
     first_sector_erased: bool,
+    expected_total_packets: Option<u16>,
+    last_packet_useful_bytes: Option<usize>,
 }
 
 #[inline(never)]
@@ -97,6 +99,8 @@ impl XmodemManager {
             header_size: mem::size_of::<ImageHeader>() as u32,
             received_eot: false,
             first_sector_erased: false,
+            expected_total_packets: None,
+            last_packet_useful_bytes: None,
         }
     }
 
@@ -115,6 +119,8 @@ impl XmodemManager {
         self.actual_firmware_size = None;
         self.received_eot = false;
         self.first_sector_erased = false;
+        self.expected_total_packets = None;
+        self.last_packet_useful_bytes = None;
 
         if addr == crate::APP_ADDR {
             self.expected_magic = IMAGE_MAGIC_APP;
@@ -191,8 +197,13 @@ impl XmodemManager {
                         
                         // if we have size info from header then we just cut unnecessary stuff
                         if let Some(firmware_size) = self.actual_firmware_size {
+                            // if we got less than expected then it's an error
+                            if self.total_data_received < firmware_size {
+                                self.state = XmodemState::Error;
+                                return Err(XmodemError::InvalidPacket);
+                            }
+                            // if we got as much as we expected then just check that current_addr is pointing to the actual end of data
                             if self.current_addr > self.target_addr + firmware_size {
-                                // set the correct addr for end of the firmware
                                 self.current_addr = self.target_addr + firmware_size;
                             }
                         }
@@ -240,7 +251,7 @@ impl XmodemManager {
     }
 
     fn process_packet(&mut self) -> Result<bool, XmodemError> {
-        // dissassemply the packet
+        // dissassemly the packet
         let packet_num: u8 = self.buffer[1];
         let packet_num_complement: u8 = self.buffer[2];
         
@@ -284,9 +295,9 @@ impl XmodemManager {
                 return Err(XmodemError::InvalidPacket);
             }
             
-            // calculate useful bytes
+            // calculate useful bytes in the packet
             let data = &self.buffer[3..3+DATA_SIZE];
-            let mut useful_bytes: usize = self.find_useful_bytes_in_packet(data);
+            let mut useful_bytes: usize = self.find_useful_bytes_in_packet(data, packet_num);
             
             if useful_bytes == 0 {
                 self.state = XmodemState::WaitingForData;
@@ -300,20 +311,25 @@ impl XmodemManager {
             
             self.total_data_received += useful_bytes as u32;
             
-            // check for size overflow
+            // check for overflkow if the size is not mentioned
             if let Some(firmware_size) = self.actual_firmware_size {
+                // if we already got as much data (or even more)
                 if self.total_data_received > firmware_size {
+                    // calculate overflow
                     let excess: u32 = self.total_data_received - firmware_size;
                     if excess < useful_bytes as u32 {
+                        // fix the size of useful data of the last packet
                         let adjusted_bytes: u32 = useful_bytes as u32 - excess;
                         useful_bytes = adjusted_bytes as usize;
                         self.total_data_received = firmware_size;
                     } else {
+                        // if all of the bytes in the packet were useless (not possible but still)
                         useful_bytes = 0;
                     }
                 }
             }
             
+            // check if we are not getting out of the sector
             let next_addr: u32 = self.current_addr + useful_bytes as u32;
             let current_sector_end: u32 = self.current_sector_base + 0x20000;
             
@@ -332,14 +348,14 @@ impl XmodemManager {
                 }
             }
             
-            // write to flash only useful bytes
+            // write only useful data to flash
             if useful_bytes > 0 {
                 let peripherals: stm32f4::Peripherals = unsafe { pac::Peripherals::steal() };
 
                 let mut data_to_write = [0u8; DATA_SIZE];
                 data_to_write[..useful_bytes].copy_from_slice(&self.buffer[3..3 + useful_bytes]);
                 
-                // write 
+                // write
                 let result: u8 = flash::write(&peripherals, &data_to_write[..useful_bytes], self.current_addr);
                 
                 if result != 0 {
@@ -361,40 +377,16 @@ impl XmodemManager {
         Ok(true)
     }
 
-    fn find_useful_bytes_in_packet(&self, data: &[u8]) -> usize {
-        let mut padding_start: usize = data.len();
-
-        let mut is_all_padding: bool = true;
-        for &byte in data {
-            if byte != PAD_BYTE {
-                is_all_padding = false;
-                break;
+    fn find_useful_bytes_in_packet(&self, data: &[u8], packet_num: u8) -> usize {
+        // if we know total count of packetys and this one is the last one
+        if let (Some(total_packets), Some(last_bytes)) = (self.expected_total_packets, self.last_packet_useful_bytes) {
+            if packet_num as u16 == total_packets {
+                return last_bytes;
             }
         }
         
-        if is_all_padding {
-            return 0;
-        }
-        
-        for i in (0..data.len()).rev() {
-            if data[i] != PAD_BYTE {
-                padding_start = i + 1;
-                break;
-            }
-        }
-        
-        if data.len() - padding_start >= 8 {
-            return padding_start;
-        }
-        
-
-        for i in padding_start..data.len() {
-            if data[i] != PAD_BYTE {
-                return data.len(); // no padding
-            }
-        }
-        
-        data.len()
+        // just use all of 128 bytes
+        DATA_SIZE
     }
 
     fn process_first_packet(&mut self, data: &[u8]) -> Result<bool, XmodemError> {
@@ -421,12 +413,27 @@ impl XmodemManager {
             return Err(XmodemError::InvalidMagic);
         }
         
-        // if no size value in header then we use hardcoded size
-        self.actual_firmware_size = if header.data_size > 0 {
-            Some(header.data_size + self.header_size)
+        // calculate total data of the image
+        if header.data_size > 0 {
+            // header_size + data_size from header
+            self.actual_firmware_size = Some(header.data_size + self.header_size);
+            
+            // calculate total packets count
+            let total_bytes: u32 = header.data_size + self.header_size;
+            let full_packets: u32 = total_bytes / DATA_SIZE as u32;
+            let remainder: u32 = total_bytes % DATA_SIZE as u32;
+            
+            self.expected_total_packets = Some((full_packets + if remainder > 0 { 1 } else { 0 }) as u16);
+            
+            if remainder > 0 {
+                self.last_packet_useful_bytes = Some(remainder as usize);
+            } else {
+                self.last_packet_useful_bytes = Some(DATA_SIZE); // last 128 packet
+            }
         } else {
-            Some(0x40000) // 256 kB
-        };
+            // if no size mentioned then ise hardcoded size
+            self.actual_firmware_size = Some(0x40000); // 256 kB
+        }
         
         // Compare versions
         let current_header_addr: *const ImageHeader = self.target_addr as *const ImageHeader;
@@ -463,13 +470,11 @@ impl XmodemManager {
         // Write the first packet data to flash
         let peripherals: stm32f4::Peripherals = unsafe { pac::Peripherals::steal() };
         
-        let useful_bytes: usize = self.find_useful_bytes_in_packet(data);
-        
-        let mut data_to_write = [0u8; DATA_SIZE];
-        data_to_write[..useful_bytes].copy_from_slice(&data[..useful_bytes]);
+        // first packet should have only useful data 
+        let useful_bytes: usize = DATA_SIZE;
         
         // write
-        let result: u8 = flash::write(&peripherals, &data_to_write[..useful_bytes], self.current_addr);
+        let result: u8 = flash::write(&peripherals, &data[..useful_bytes], self.current_addr);
         
         if result != 0 {
             self.state = XmodemState::Error;
