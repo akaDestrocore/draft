@@ -12,7 +12,7 @@ use cortex_m::{asm, peripheral::SYST};
 use cortex_m_rt::{entry, exception};
 use led::Leds;
 use misc::{
-    image::{ImageHeader, SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER},
+    image::{ImageHeader, SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER,},
     systick,
 };
 use stm32f4 as pac;
@@ -23,6 +23,7 @@ use xmodem::{XmodemManager, XmodemError, XmodemState, CAN};
 // Flash memory addresses
 pub const UPDATER_ADDR: u32 = 0x08008000;
 pub const APP_ADDR: u32 = 0x08020000;
+pub const LOADER_ADDR: u32 = 0x08004000;
 pub const IMAGE_HDR_SIZE: u32 = 0x200;
 pub const BOOT_TIMEOUT_MS: u32 = 10_000;
 
@@ -312,20 +313,128 @@ fn main() -> ! {
                     b'I' | b'i' => {
                         // diagnostic info
                         clear_screen(&mut uart);
-                        uart.send_string("--- System Diagnostics ---\r\n");
-                        uart.send_string("App valid: ");
-                        uart.send_string(if bootloader::is_firmware_valid(APP_ADDR) { "Yes" } else { "No" });
-                        uart.send_string("\r\n");
-                        uart.send_string("Updater valid: ");
-                        uart.send_string(if bootloader::is_firmware_valid(UPDATER_ADDR) { "Yes" } else { "No" });
+                        uart.send_string("\r\n--- System Information ---\r\n\r\n");
+                        
+                        // loader
+                        uart.send_string("Loader (this image) : ");
+
+                        if let Some(header) = bootloader::get_firmware_header(LOADER_ADDR) {
+                            uart.send_string("Valid\r\n");
+                            
+                            uart.send_string("  Version: ");
+                            uart.send_string(itoa(header.version_major as u32));
+                            uart.send_string(".");
+                            uart.send_string(itoa(header.version_minor as u32));
+                            uart.send_string(".");
+                            uart.send_string(itoa(header.version_patch as u32));
+                            uart.send_string("\r\n");
+                            
+                            uart.send_string("  Vector table: 0x");
+                            uart.send_string(to_hex(header.vector_addr));
+                            uart.send_string("\r\n");
+                            
+                            uart.send_string("  Data size: ");
+                            uart.send_string(itoa(header.data_size));
+                            uart.send_string(" bytes\r\n");
+                            
+                            uart.send_string("  CRC: 0x");
+                            uart.send_string(to_hex(header.crc));
+                            uart.send_string("\r\n");
+                            
+                            uart.send_string("  Address: 0x");
+                            uart.send_string(to_hex(LOADER_ADDR));
+                            uart.send_string("\r\n");
+                        } else {
+                            uart.send_string("Invalid or Not Found\r\n");
+                        }
+                        
                         uart.send_string("\r\n");
                         
-                        uart.send_string("Press any key to return to menu...\r\n");
+                        // app
+                        uart.send_string("Application: ");
+                        if let Some(header) = bootloader::get_firmware_header(APP_ADDR) {
+                            uart.send_string("Valid\r\n");
+                            
+                            uart.send_string("  Version: ");
+                            uart.send_string(itoa(header.version_major as u32));
+                            uart.send_string(".");
+                            uart.send_string(itoa(header.version_minor as u32));
+                            uart.send_string(".");
+                            uart.send_string(itoa(header.version_patch as u32));
+                            uart.send_string("\r\n");
+                            
+                            uart.send_string("  Vector table: 0x");
+                            uart.send_string(to_hex(header.vector_addr));
+                            uart.send_string("\r\n");
+                            
+                            uart.send_string("  Data size: ");
+                            uart.send_string(itoa(header.data_size));
+                            uart.send_string(" bytes\r\n");
+                            
+                            uart.send_string("  CRC: 0x");
+                            uart.send_string(to_hex(header.crc));
+                            uart.send_string("\r\n");
+                            
+                            uart.send_string("  Address: 0x");
+                            uart.send_string(to_hex(APP_ADDR));
+                            uart.send_string("\r\n");
+                        } else {
+                            uart.send_string("Invalid or Not Found\r\n");
+                        }
+                        
+                        uart.send_string("\r\n");
+                        
+                        // updater
+                        uart.send_string("Updater: ");
+                        if let Some(header) = bootloader::get_firmware_header(UPDATER_ADDR) {
+                            uart.send_string("Valid\r\n");
+                            
+                            uart.send_string("  Version: ");
+                            uart.send_string(itoa(header.version_major as u32));
+                            uart.send_string(".");
+                            uart.send_string(itoa(header.version_minor as u32));
+                            uart.send_string(".");
+                            uart.send_string(itoa(header.version_patch as u32));
+                            uart.send_string("\r\n");
+                            
+                            uart.send_string("  Vector table: 0x");
+                            uart.send_string(to_hex(header.vector_addr));
+                            uart.send_string("\r\n");
+                            
+                            uart.send_string("  Data size: ");
+                            uart.send_string(itoa(header.data_size));
+                            uart.send_string(" bytes\r\n");
+                            
+                            uart.send_string("  CRC: 0x");
+                            uart.send_string(to_hex(header.crc));
+                            uart.send_string("\r\n");
+                            
+                            uart.send_string("  Address: 0x");
+                            uart.send_string(to_hex(UPDATER_ADDR));
+                            uart.send_string("\r\n");
+                        } else {
+                            uart.send_string("Invalid or Not Found\r\n");
+                        }
+                        
+                        uart.send_string("\r\n");
+                        uart.send_string("System Info:\r\n");
+                        uart.send_string("  Boot timeout: ");
+                        uart.send_string(itoa(BOOT_TIMEOUT_MS / 1000));
+                        uart.send_string(" seconds\r\n");
+                        uart.send_string("  System uptime: ");
+                        uart.send_string(itoa(systick::get_tick_ms() / 1000));
+                        uart.send_string(" seconds\r\n");
+                        
+                        uart.send_string("\r\nPress 'Escape' to return to menu...\r\n");
                         
                         loop {
                             uart.process();
-                            if uart.read_byte().is_some() {
-                                break;
+                            if let Some(key) = uart.read_byte() {
+                                if key == b'\x1B' {
+                                    autoboot_timer = systick::get_tick_ms();
+                                    break;
+                                }
+                                autoboot_timer = systick::get_tick_ms();
                             }
                         }
                         
@@ -581,6 +690,44 @@ fn itoa(mut value: u32) -> &'static str {
         BUFFER[i] = 0;
         
         // convert to string slice
+        core::str::from_utf8_unchecked(&BUFFER[0..i])
+    }
+}
+
+fn to_hex(mut value: u32) -> &'static str {
+    static mut BUFFER: [u8; 16] = [0; 16];
+    
+    if value == 0 {
+        return "0";
+    }
+    
+    let mut i: usize = 0;
+    unsafe {
+        while value > 0 && i < BUFFER.len() {
+            let digit: u32 = value % 16;
+            BUFFER[i] = if digit < 10 {
+                b'0' + digit as u8
+            } else {
+                b'a' + (digit - 10) as u8
+            };
+            value /= 16;
+            i += 1;
+        }
+        
+        // Reverse the digits
+        let mut j: usize = 0;
+        let mut k: usize = i - 1;
+        while j < k {
+            let temp: u8 = BUFFER[j];
+            BUFFER[j] = BUFFER[k];
+            BUFFER[k] = temp;
+            j += 1;
+            k -= 1;
+        }
+        
+        BUFFER[i] = 0;
+        
+        // Convert to string slice
         core::str::from_utf8_unchecked(&BUFFER[0..i])
     }
 }

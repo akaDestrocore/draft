@@ -1,10 +1,10 @@
 use core::ptr;
 use cortex_m::asm;
 use cortex_m::peripheral::SCB;
-use misc::image::{ImageHeader, IMAGE_MAGIC_APP, IMAGE_MAGIC_UPDATER};
+use misc::image::{ImageHeader, IMAGE_MAGIC_APP, IMAGE_MAGIC_UPDATER, IMAGE_MAGIC_LOADER};
 use stm32f4 as pac;
 
-use crate::{APP_ADDR, UPDATER_ADDR, IMAGE_HDR_SIZE};
+use crate::{APP_ADDR, UPDATER_ADDR, LOADER_ADDR, IMAGE_HDR_SIZE};
 
 #[derive(PartialEq, Copy, Clone)]
 pub enum BootOption {
@@ -188,5 +188,16 @@ pub fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
         // Jump to reset handler
         let jump_fn: extern "C" fn() -> ! = core::mem::transmute(reset_vector);
         jump_fn();
+    }
+}
+
+pub fn get_firmware_header(addr: u32) -> Option<ImageHeader> {
+    let header: ImageHeader = unsafe { ptr::read_volatile(addr as *const ImageHeader) };
+    
+    match addr {
+        addr if addr == APP_ADDR && header.image_magic == IMAGE_MAGIC_APP => Some(header),
+        addr if addr == UPDATER_ADDR && header.image_magic == IMAGE_MAGIC_UPDATER => Some(header),
+        addr if addr == LOADER_ADDR && header.image_magic == IMAGE_MAGIC_LOADER => Some(header),
+        _ => None,
     }
 }
