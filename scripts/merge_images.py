@@ -1,14 +1,48 @@
 import argparse
 import os
+import binascii
+import struct
+
+
+HEADER_SIZE = 0x200
+IMAGE_MAGIC_OFFSET = 0x00
+IMAGE_HDR_VERSION_OFFSET = 0x04
+IMAGE_TYPE_OFFSET = 0x06
+VERSION_MAJOR_OFFSET = 0x07
+VERSION_MINOR_OFFSET = 0x08
+VERSION_PATCH_OFFSET = 0x09
+PADDING_OFFSET = 0x0A
+VECTOR_ADDR_OFFSET = 0x0C
+CRC_OFFSET = 0x10
+DATA_SIZE_OFFSET = 0x14
+
+def calculate_crc32(data):
+    return binascii.crc32(data) & 0xFFFFFFFF
+
+def update_header(binary_data, base_addr):
+    header = bytearray(binary_data[:HEADER_SIZE])
+    firmware = binary_data[HEADER_SIZE:]
+    
+    # calculate size and CRC
+    firmware_size = len(firmware)
+    firmware_crc = calculate_crc32(firmware)
+    vector_addr = base_addr + HEADER_SIZE
+    
+    # update header fields
+    struct.pack_into('<I', header, VECTOR_ADDR_OFFSET, vector_addr)  # vector_addr (4 байта)
+    struct.pack_into('<I', header, CRC_OFFSET, firmware_crc)         # crc (4 байта)
+    struct.pack_into('<I', header, DATA_SIZE_OFFSET, firmware_size)  # data_size (4 байта)
+    
+    print(f"  - Header updated: vector_addr=0x{vector_addr:08X}, data_size={firmware_size} bytes, CRC=0x{firmware_crc:08X}")
+    
+    return header + firmware
 
 def merge_images(boot_filename, loader_filename, updater_filename, app_filename):
-    """
-    Merge four binaries into one, preserving headers and positions
-    """
     # Memory map offsets from base address 0x08000000
     LOADER_OFFSET = 0x4000   # 0x08004000 
     UPDATER_OFFSET = 0x8000  # 0x08008000 
     APP_OFFSET = 0x20000     # 0x08020000
+    BASE_ADDR = 0x08000000
 
     # Get file sizes
     boot_size = os.stat(boot_filename).st_size
@@ -40,7 +74,16 @@ def merge_images(boot_filename, loader_filename, updater_filename, app_filename)
     with open(app_filename, "rb") as f:
         app_data = f.read()
 
-    # Create merged binary
+    # Update headers
+    print("\nUpdating headers:")
+    print("Loader header:")
+    loader_data = update_header(loader_data, BASE_ADDR + LOADER_OFFSET)
+    print("Updater header:")
+    updater_data = update_header(updater_data, BASE_ADDR + UPDATER_OFFSET)
+    print("Application header:")
+    app_data = update_header(app_data, BASE_ADDR + APP_OFFSET)
+
+    # Merged binary
     output_data = bytearray(APP_OFFSET + len(app_data))
     
     # Copy components at their offsets
@@ -54,6 +97,19 @@ def merge_images(boot_filename, loader_filename, updater_filename, app_filename)
 
     print(f"\nCreated merged binary: merged_firmware.bin")
     print(f"Total size: {os.stat('merged_firmware.bin').st_size} bytes")
+
+    # also save standalone binaries
+    with open("loader.bin", "wb") as f:
+        f.write(loader_data)
+    with open("updater.bin", "wb") as f:
+        f.write(updater_data)
+    with open("application.bin", "wb") as f:
+        f.write(app_data)
+    
+    print("Individual updated binaries saved:")
+    print(f"- loader.bin ({len(loader_data)} bytes)")
+    print(f"- updater.bin ({len(updater_data)} bytes)")
+    print(f"- app.bin ({len(app_data)} bytes)")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

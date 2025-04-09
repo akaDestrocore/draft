@@ -6,6 +6,12 @@ use stm32f4 as pac;
 
 use crate::{APP_ADDR, UPDATER_ADDR, LOADER_ADDR, IMAGE_HDR_SIZE};
 
+extern "C" {
+    static __firmware_size: u32;
+}
+
+use crate::IMAGE_HEADER;
+
 #[derive(PartialEq, Copy, Clone)]
 pub enum BootOption {
     None,
@@ -192,6 +198,7 @@ pub fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
 }
 
 pub fn get_firmware_header(addr: u32) -> Option<ImageHeader> {
+    // Читаем заголовок из флеш-памяти
     let header: ImageHeader = unsafe { ptr::read_volatile(addr as *const ImageHeader) };
     
     match addr {

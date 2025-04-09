@@ -6,13 +6,15 @@ mod xmodem;
 mod uart;
 mod led;
 
+include!(concat!(env!("OUT_DIR"), "/header_values.rs"));
+
 use bootloader::{BootOption, boot_application, boot_updater};
 use core::panic::PanicInfo;
 use cortex_m::{asm, peripheral::SYST};
 use cortex_m_rt::{entry, exception};
 use led::Leds;
 use misc::{
-    image::{ImageHeader, SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER,},
+    image::{SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER},
     systick,
 };
 use stm32f4 as pac;
@@ -43,14 +45,6 @@ enum PostXmodemState {
 #[no_mangle]
 #[link_section = ".shared_memory"]
 pub static mut SHARED_MEMORY: SharedMemory = SharedMemory::new();
-
-#[no_mangle]
-#[link_section = ".image_hdr"]
-pub static mut IMAGE_HEADER: ImageHeader = ImageHeader::new(
-    IMAGE_TYPE_LOADER,
-    IMAGE_MAGIC_LOADER,
-    1, 0, 0
-);
 
 extern "C" {
     static __firmware_size: u32;
@@ -195,20 +189,15 @@ fn main() -> ! {
     let p: Peripherals = pac::Peripherals::take().unwrap();
     let mut cp: cortex_m::Peripherals = cortex_m::Peripherals::take().unwrap();
 
-    // update header
     unsafe {
-        // get firmware size from linker script
+        // Get firmware size from linker script
         let size: *const u32 = &__firmware_size as *const u32;
         let firmware_size: u32 = *size;
-        let vector_addr: u32 = LOADER_ADDR + IMAGE_HDR_SIZE;
         
+        // Update only the size in the header
         IMAGE_HEADER.update_data_size(firmware_size);
-        IMAGE_HEADER.vector_addr = vector_addr;
         
-        // calculate CRC
-        let firmware_start: u32 = LOADER_ADDR + IMAGE_HDR_SIZE;
-        // IMAGE_HEADER.crc = calculate_crc32(firmware_start, firmware_size);
-        IMAGE_HEADER.crc = 0;
+        // IMAGE_HEADER.crc
     }
 
     // Setup system clock to 90MHz
@@ -246,8 +235,6 @@ fn main() -> ! {
     let mut update_in_progress: bool = false;
     let mut firmware_target: u32 = APP_ADDR;
     let mut led_toggle_time: u32 = systick::get_tick_ms();
-    
-    // Состояние восстановления после XMODEM
     let mut post_xmodem_state: PostXmodemState = PostXmodemState::Complete;
     let mut xmodem_error_occurred: bool = false;
 
@@ -327,7 +314,7 @@ fn main() -> ! {
                             // start application update
                             clear_screen(&mut uart);
                             uart.send_string("Updating application...\r\n");
-                            uart.send_string("Send file using XMODEM protocol with CRC-16. If menu doesn't load after update is over, please press 'Esc'\r\n");
+                            uart.send_string("Send file using XMODEM protocol with CRC-16.\r\nIf menu doesn't load after update is over, please press 'Esc'\r\n");
                             firmware_target = APP_ADDR;
                             xmodem.start(firmware_target);
                             update_in_progress = true;
