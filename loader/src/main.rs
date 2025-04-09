@@ -79,9 +79,10 @@ fn display_menu(uart: &mut UartManager) {
     uart.send_string("xxxxxxxxxx   xxxxxx  xxxxxx   xxxxxxxxxxx\r\n");
     uart.send_string("xxxxxxxxxxxxxx             xxxxxxxxxxxxxx\r\n");
     uart.send_string("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n\r\n");
-    uart.send_string("Press 'U' to enter updater\r\n");
-    uart.send_string("Press 'F' to update firmware using XMODEM(CRC)\r\n");
     uart.send_string("Press 'Enter' to boot application\r\n");
+    uart.send_string("Press 'I' to get information about system state\r\n");
+    uart.send_string("Press 'F' to update firmware using XMODEM(CRC)\r\n");
+    uart.send_string("Press 'U' to enter updater\r\n");
     uart.send_string("Will boot automatically in 10 seconds\r\n");
     
     for _ in 0..10 {
@@ -308,7 +309,7 @@ fn main() -> ! {
                         }
                     },
 
-                    b'I' => {
+                    b'I' | b'i' => {
                         // diagnostic info
                         clear_screen(&mut uart);
                         uart.send_string("--- System Diagnostics ---\r\n");
