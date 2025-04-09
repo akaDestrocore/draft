@@ -1,12 +1,10 @@
 use core::sync::atomic::{AtomicBool, Ordering};
-use heapless::spsc::Queue;
+use misc::ring_buffer::RingBuffer;
 use stm32f4 as pac;
 
-pub const UART_BUFFER_SIZE: usize = 256;
-
-// Static buffers for UART communications
-static mut RX_BUFFER: Queue<u8, UART_BUFFER_SIZE> = Queue::new();
-static mut TX_BUFFER: Queue<u8, UART_BUFFER_SIZE> = Queue::new();
+// Статические буферы для UART-коммуникации
+static mut RX_BUFFER: RingBuffer = RingBuffer::new();
+static mut TX_BUFFER: RingBuffer = RingBuffer::new();
 static TX_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug)]
@@ -28,30 +26,30 @@ impl<'a> UartManager<'a> {
     }
 
     pub fn init(&mut self) {
-        // Enable UART
+        // Инициализация UART
         unsafe {
-            // Configure USART2 @ 115200 baud, 8-bit, 1 stop bit, no parity
+            // Настройка USART2 @ 115200 бод, 8-бит, 1 стоп-бит, без четности
             self.usart2.brr().write(|w| w.bits(0xc3)); // 90MHz / 115200 ≈ 781.25 = 0xc3
             
-            // Enable USART2
+            // Включение USART2
             self.usart2.cr1().modify(|_, w| {
-                w.ue().enabled()  // Enable USART
-                 .te().enabled()  // Enable transmitter
-                 .re().enabled()  // Enable receiver
-                 .rxneie().enabled() // Enable RXNE interrupt
+                w.ue().enabled()     // Включение USART
+                 .te().enabled()     // Включение передатчика
+                 .re().enabled()     // Включение приемника
+                 .rxneie().enabled() // Включение прерывания RXNE
             });
         }
     }
 
     pub fn process(&mut self) {
-        // Check if we need to start a new transmission
+        // Проверка необходимости начать новую передачу
         if !TX_IN_PROGRESS.load(Ordering::SeqCst) {
             unsafe {
-                if let Some(byte) = TX_BUFFER.dequeue() {
-                    // Write the byte to the data register
+                if let Some(byte) = TX_BUFFER.read() {
+                    // Запись байта в регистр данных
                     self.usart2.dr().write(|w| w.bits(byte as u16));
                     
-                    // Enable TXE interrupt
+                    // Включение прерывания TXE
                     self.usart2.cr1().modify(|_, w| w.txeie().enabled());
                     
                     TX_IN_PROGRESS.store(true, Ordering::SeqCst);
@@ -61,13 +59,13 @@ impl<'a> UartManager<'a> {
     }
 
     pub fn read_byte(&mut self) -> Option<u8> {
-        unsafe { RX_BUFFER.dequeue() }
+        unsafe { RX_BUFFER.read() }
     }
 
     pub fn send_byte(&mut self, byte: u8) {
         unsafe {
-            if TX_BUFFER.enqueue(byte).is_err() {
-                // Buffer is full, but we can't handle errors here
+            if !TX_BUFFER.write(byte) {
+                // Буфер полон, но мы не можем обрабатывать ошибки здесь
                 return;
             }
         }
@@ -85,29 +83,29 @@ impl<'a> UartManager<'a> {
     }
 }
 
-// This function is called from the USART2 interrupt handler
+// Эта функция вызывается из обработчика прерывания USART2
 #[no_mangle]
 pub extern "C" fn process_uart_interrupt() {
     use pac::Peripherals;
     
     let p = unsafe { Peripherals::steal() };
     
-    // Check RX
+    // Проверка RX
     if p.usart2.sr().read().rxne().bit_is_set() {
         let data = p.usart2.dr().read().bits() as u8;
         unsafe {
-            let _ = RX_BUFFER.enqueue(data);
+            let _ = RX_BUFFER.write(data);
         }
     }
     
-    // Check TX
+    // Проверка TX
     if p.usart2.sr().read().txe().bit_is_set() && p.usart2.cr1().read().txeie().bit_is_set() {
         unsafe {
-            if let Some(byte) = TX_BUFFER.dequeue() {
-                // Send next byte
+            if let Some(byte) = TX_BUFFER.read() {
+                // Отправка следующего байта
                 p.usart2.dr().write(|w| w.bits(byte as u16));
             } else {
-                // No more data to send, disable TXE interrupt
+                // Больше нет данных для отправки, отключаем прерывание TXE
                 p.usart2.cr1().modify(|_, w| w.txeie().disabled());
                 TX_IN_PROGRESS.store(false, Ordering::SeqCst);
             }
