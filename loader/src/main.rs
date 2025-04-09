@@ -18,7 +18,7 @@ use misc::{
 use stm32f4 as pac;
 use stm32f4::Peripherals;
 use uart::{UartManager, UartError};
-use xmodem::{XmodemManager, XmodemError, XmodemState};
+use xmodem::{XmodemManager, XmodemError, XmodemState, CAN};
 
 // Flash memory addresses
 pub const UPDATER_ADDR: u32 = 0x08008000;
@@ -46,6 +46,10 @@ pub static IMAGE_HEADER: ImageHeader = ImageHeader::new(
 // ANSI escape
 fn clear_screen(uart: &mut UartManager) {
     uart.send_string("\x1B[2J\x1B[1;1H");
+
+    for _ in 0..5 {
+        uart.process();
+    }
 }
 
 fn display_menu(uart: &mut UartManager) {
@@ -71,6 +75,10 @@ fn display_menu(uart: &mut UartManager) {
     uart.send_string("Press 'F' to update firmware using XMODEM(CRC)\r\n");
     uart.send_string("Press 'Enter' to boot application\r\n");
     uart.send_string("Will boot automatically in 10 seconds\r\n");
+    
+    for _ in 0..10 {
+        uart.process();
+    }
 }
 
 fn check_application_valid(uart: &mut UartManager) -> bool {
@@ -90,6 +98,26 @@ fn is_enter_blocked(current_time: u32) -> bool {
 fn block_enter_temporarily(current_time: u32) {
     unsafe {
         ENTER_BLOCKED_UNTIL = current_time + ENTER_BLOCK_AFTER_UPDATE_MS;
+    }
+}
+
+fn send_cancel_sequence(uart: &mut UartManager) {
+    // XMODEM cancel sequence
+    uart.send_byte(CAN);
+    uart.send_byte(CAN);
+    uart.send_byte(CAN);
+
+    while !uart.is_tx_complete() {
+        uart.process();
+    }
+    
+    let start_time: u32 = systick::get_tick_ms();
+    while !systick::wait_ms(start_time, 300) {
+        uart.process();
+    }
+
+    for _ in 0..10 {
+        uart.process();
     }
 }
 
@@ -316,9 +344,19 @@ fn main() -> ! {
                         }
 
                         update_in_progress = false;
+                        
+                        systick::wait_ms(systick::get_tick_ms(), 100);
                         clear_rx_buffer(&mut uart);
+                        for _ in 0..10 {
+                            uart.process();
+                        }
+                        
                         clear_screen(&mut uart);
                         uart.send_string("\r\nTransfer complete! Firmware updated successfully.\r\n\r\n");
+                        
+                        for _ in 0..5 {
+                            uart.process();
+                        }
 
                         // reset autoboot timeout
                         autoboot_timer = systick::get_tick_ms();
@@ -326,43 +364,86 @@ fn main() -> ! {
                         // set Enter lock
                         block_enter_temporarily(systick::get_tick_ms());
 
-                        leds.set_all(true);
-                        systick::wait_ms(systick::get_tick_ms(), 500);
-                        leds.set_all(false);
-
                         while !uart.is_tx_complete() {
                             uart.process();
                         }
+                        systick::wait_ms(systick::get_tick_ms(), 1000);
                         
-                        systick::wait_ms(systick::get_tick_ms(), 500);
                         clear_screen(&mut uart);
                         uart.send_string("\r\nUpdate complete! Please select an option:\r\n\r\n");
+
+                        for _ in 0..5 {
+                            uart.process();
+                        }
+                        
                         display_menu(&mut uart);
+
                         while !uart.is_tx_complete() {
                             uart.process();
                         }
                     },
                     Err(XmodemError::Cancelled) => {
+                        systick::wait_ms(systick::get_tick_ms(), 100);
+                        clear_rx_buffer(&mut uart);
+                        for _ in 0..10 {
+                            uart.process();
+                        }
+                        
                         clear_screen(&mut uart);
                         uart.send_string("\r\nTransfer cancelled.\r\n");
-                        clear_rx_buffer(&mut uart);
+
+                        for _ in 0..5 {
+                            uart.process();
+                        }
+                        
                         block_enter_temporarily(systick::get_tick_ms());
                         update_in_progress = false;
                         leds.set(2, true);
+                        
                         systick::wait_ms(systick::get_tick_ms(), 1500);
+                        
+                        for _ in 0..5 {
+                            uart.process();
+                        }
+                        
                         display_menu(&mut uart);
+                        
+                        while !uart.is_tx_complete() {
+                            uart.process();
+                        }
                     },
                     Err(XmodemError::Timeout) => {
+                        systick::wait_ms(systick::get_tick_ms(), 100);
+                        
+                        clear_rx_buffer(&mut uart);
+
+                        for _ in 0..10 {
+                            uart.process();
+                        }
+                        
                         clear_screen(&mut uart);
                         uart.send_string("\r\nTransfer timed out.\r\n");
-                        clear_rx_buffer(&mut uart);
+
+                        for _ in 0..5 {
+                            uart.process();
+                        }
                         
                         // lock Enter 
                         block_enter_temporarily(systick::get_tick_ms());
                         update_in_progress = false;
                         leds.set(2, true);
+                        
                         systick::wait_ms(systick::get_tick_ms(), 1500);
+
+                        for _ in 0..5 {
+                            uart.process();
+                        }
+                        
                         display_menu(&mut uart);
+
+                        while !uart.is_tx_complete() {
+                            uart.process();
+                        }
                     },
                     Err(XmodemError::SequenceError) | Err(XmodemError::CrcError) => {
                         // XMODEM will handle retries, we just send responses
@@ -377,34 +458,124 @@ fn main() -> ! {
                         }
                     },
                     Err(XmodemError::FlashWriteError) => {
+                        xmodem.cancel_transfer();
+                        send_cancel_sequence(&mut uart);
+
+                        systick::wait_ms(systick::get_tick_ms(), 100);
+
+                        clear_rx_buffer(&mut uart);
+
+                        for _ in 0..10 {
+                            uart.process();
+                        }
+                        
                         clear_screen(&mut uart);
                         uart.send_string("\r\nError writing to flash memory.\r\n");
+
+                        for _ in 0..5 {
+                            uart.process();
+                        }
+                        
                         clear_rx_buffer(&mut uart);
                         block_enter_temporarily(systick::get_tick_ms());
                         update_in_progress = false;
                         leds.set(2, true);
+
                         systick::wait_ms(systick::get_tick_ms(), 1500);
+
+                        for _ in 0..5 {
+                            uart.process();
+                        }
+                        
                         display_menu(&mut uart);
+
+                        while !uart.is_tx_complete() {
+                            uart.process();
+                        }
                     },
                     Err(XmodemError::InvalidMagic) => {
+                        xmodem.cancel_transfer();
+                        send_cancel_sequence(&mut uart);
+                        
+                        
+                        systick::wait_ms(systick::get_tick_ms(), 100);
+                        
+                       
+                        clear_rx_buffer(&mut uart);
+                        
+                       
+                        for _ in 0..10 {
+                            uart.process();
+                        }
+                        
                         clear_screen(&mut uart);
                         uart.send_string("\r\nInvalid firmware image magic number.\r\n");
+                        
+                        
+                        for _ in 0..5 {
+                            uart.process();
+                        }
+                        
                         clear_rx_buffer(&mut uart);
                         block_enter_temporarily(systick::get_tick_ms());
                         update_in_progress = false;
                         leds.set(2, true);
+                        
+                        
                         systick::wait_ms(systick::get_tick_ms(), 1500);
+                        
+                        for _ in 0..5 {
+                            uart.process();
+                        }
+                        
                         display_menu(&mut uart);
+                        
+                        while !uart.is_tx_complete() {
+                            uart.process();
+                        }
                     },
                     Err(XmodemError::OlderVersion) => {
+                        xmodem.cancel_transfer();
+                        send_cancel_sequence(&mut uart);
+                        
+                        
+                        systick::wait_ms(systick::get_tick_ms(), 100);
+                        
+                       
+                        clear_rx_buffer(&mut uart);
+                        
+                       
+                        for _ in 0..10 {
+                            uart.process();
+                        }
+                        
                         clear_screen(&mut uart);
                         uart.send_string("\r\nFirmware version is older than currently installed.\r\n");
+                        
+                        
+                        for _ in 0..5 {
+                            uart.process();
+                        }
+                        
                         clear_rx_buffer(&mut uart);
                         block_enter_temporarily(systick::get_tick_ms());
                         update_in_progress = false;
                         leds.set(2, true);
+                        
+                        
                         systick::wait_ms(systick::get_tick_ms(), 1500);
+                        
+                        
+                        for _ in 0..5 {
+                            uart.process();
+                        }
+                        
                         display_menu(&mut uart);
+                        
+                        // Гарантируем завершение передачи
+                        while !uart.is_tx_complete() {
+                            uart.process();
+                        }
                     }
                 }
             }
@@ -418,14 +589,44 @@ fn main() -> ! {
             
             // Check for errors
             if xmodem.get_state() == XmodemState::Error {
+                
+                systick::wait_ms(systick::get_tick_ms(), 100);
+                
+               
+                clear_rx_buffer(&mut uart);
+                
+               
+                for _ in 0..10 {
+                    uart.process();
+                }
+                
                 clear_screen(&mut uart);
                 uart.send_string("\r\nXMODEM transfer error. Aborting.\r\n");
+                
+                
+                for _ in 0..5 {
+                    uart.process();
+                }
+                
                 clear_rx_buffer(&mut uart);
                 block_enter_temporarily(systick::get_tick_ms());
                 update_in_progress = false;
                 leds.set(2, true);
+                
+                
                 systick::wait_ms(systick::get_tick_ms(), 1500);
+                
+                
+                for _ in 0..5 {
+                    uart.process();
+                }
+                
                 display_menu(&mut uart);
+                
+                // Гарантируем завершение передачи
+                while !uart.is_tx_complete() {
+                    uart.process();
+                }
             }
         }
 
@@ -466,6 +667,12 @@ fn main() -> ! {
             if current_time.wrapping_sub(autoboot_timer) >= BOOT_TIMEOUT_MS {
                 if check_application_valid(&mut uart) {
                     uart.send_string("\r\nAuto-boot timeout reached. Booting application...\r\n");
+                    
+                    
+                    for _ in 0..5 {
+                        uart.process();
+                    }
+                    
                     while !uart.is_tx_complete() {
                         uart.process();
                     }
@@ -474,6 +681,11 @@ fn main() -> ! {
                     boot_option = BootOption::Application;
                 } else {
                     uart.send_string("\r\nAuto-boot timeout reached but valid application not found!\r\n");
+                    
+                    
+                    for _ in 0..5 {
+                        uart.process();
+                    }
                     
                     // reset autoboot timer
                     autoboot_timer = current_time;

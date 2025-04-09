@@ -66,6 +66,7 @@ pub struct XmodemManager {
     actual_firmware_size: Option<u32>,
     header_size: u32,
     received_eot: bool,
+    first_sector_erased: bool,
 }
 
 #[inline(never)]
@@ -95,6 +96,7 @@ impl XmodemManager {
             actual_firmware_size: None,
             header_size: mem::size_of::<ImageHeader>() as u32,
             received_eot: false,
+            first_sector_erased: false,
         }
     }
 
@@ -112,6 +114,7 @@ impl XmodemManager {
         self.total_data_received = 0;
         self.actual_firmware_size = None;
         self.received_eot = false;
+        self.first_sector_erased = false;
 
         if addr == crate::APP_ADDR {
             self.expected_magic = IMAGE_MAGIC_APP;
@@ -125,16 +128,6 @@ impl XmodemManager {
         }
 
         self.current_sector_base = addr;
-        // ersae first sector at target address
-        let peripherals: stm32f4::Peripherals = unsafe {
-            pac::Peripherals::steal()
-        };
-        match flash::erase_sector(&peripherals, addr) {
-            0 => { self.state = XmodemState::Error;},
-            _ => {
-                // success
-            }
-        }
     }
 
     pub fn process_byte(&mut self, byte: u8) -> Result<bool, XmodemError> {
@@ -276,7 +269,7 @@ impl XmodemManager {
             return Err(XmodemError::CrcError);
         }
 
-        // check header and parse size oout of the first packet
+        // check header and parse size out of the first packet
         if packet_num == 1 && !self.first_packet_processed {
             let mut data_copy = [0u8; DATA_SIZE];
             data_copy.copy_from_slice(&self.buffer[3..3+DATA_SIZE]);
@@ -286,6 +279,11 @@ impl XmodemManager {
                 return result;
             }
         } else {
+            if packet_num == 2 && !self.first_packet_processed {
+                self.state = XmodemState::Error;
+                return Err(XmodemError::InvalidPacket);
+            }
+            
             // calculate useful bytes
             let data = &self.buffer[3..3+DATA_SIZE];
             let mut useful_bytes: usize = self.find_useful_bytes_in_packet(data);
@@ -448,6 +446,20 @@ impl XmodemManager {
             }
         }
         
+        // after checking the header we can erase sector
+        if !self.first_sector_erased {
+            let peripherals: stm32f4::Peripherals = unsafe { pac::Peripherals::steal() };
+            match flash::erase_sector(&peripherals, self.target_addr) {
+                0 => { 
+                    self.state = XmodemState::Error;
+                    return Err(XmodemError::FlashWriteError);
+                },
+                _ => {
+                    self.first_sector_erased = true;
+                }
+            }
+        }
+        
         // Write the first packet data to flash
         let peripherals: stm32f4::Peripherals = unsafe { pac::Peripherals::steal() };
         
@@ -526,5 +538,10 @@ impl XmodemManager {
 
     pub fn get_packet_count(&self) -> u16 {
         self.packet_count
+    }
+    
+    pub fn cancel_transfer(&mut self) {
+        self.state = XmodemState::Error;
+        self.next_byte_to_send = None;
     }
 }
