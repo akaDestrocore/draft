@@ -108,8 +108,8 @@ def merge_images(boot_filename, loader_filename, updater_filename, app_filename)
     
     print("Individual updated binaries saved:")
     print(f"- loader.bin ({len(loader_data)} bytes)")
-    print(f"- updater.bin ({len(updater_data)} bytes)")
-    print(f"- app.bin ({len(app_data)} bytes)")
+    print(f"- updater.bin ({len(updater_data)} bytes)")F
+    print(f"- application.bin ({len(app_data)} bytes)")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

@@ -14,7 +14,6 @@ pub const ACK: u8 = 0x06;
 pub const NAK: u8 = 0x15;
 pub const CAN: u8 = 0x18;
 pub const X_C: u8 = 0x43;
-pub const PAD_BYTE: u8 = 0x1A;
 
 // Timeout values in millis
 const PACKET_TIMEOUT_MS: u32 = 5000; // 5 sec for each packet
@@ -22,6 +21,12 @@ const C_RETRY_INTERVAL_MS: u32 = 3000;
 const MAX_RETRIES: u8 = 10;
 const PACKET_SIZE: usize = 133;
 const DATA_SIZE: usize = 128;
+
+#[inline(never)]
+fn breakpoint_anchor<T>(val: T) {
+    let _ = val;
+    asm::nop();
+}
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum XmodemState {
@@ -71,12 +76,6 @@ pub struct XmodemManager {
     last_packet_useful_bytes: Option<usize>,
 }
 
-#[inline(never)]
-fn breakpoint_anchor <T>(val:T) {
-    let _ = val;
-    asm::nop();
-}
-
 impl XmodemManager {
     pub fn new() -> Self {
         Self {
@@ -96,7 +95,7 @@ impl XmodemManager {
             current_sector_base: 0,
             total_data_received: 0,
             actual_firmware_size: None,
-            header_size: mem::size_of::<ImageHeader>() as u32,
+            header_size: crate::IMAGE_HDR_SIZE,
             received_eot: false,
             first_sector_erased: false,
             expected_total_packets: None,
@@ -251,7 +250,7 @@ impl XmodemManager {
     }
 
     fn process_packet(&mut self) -> Result<bool, XmodemError> {
-        // dissassemly the packet
+        // dissassemble the packet
         let packet_num: u8 = self.buffer[1];
         let packet_num_complement: u8 = self.buffer[2];
         
@@ -348,6 +347,8 @@ impl XmodemManager {
                 }
             }
             
+            breakpoint_anchor(1);
+
             // write only useful data to flash
             if useful_bytes > 0 {
                 let peripherals: stm32f4::Peripherals = unsafe { pac::Peripherals::steal() };
@@ -378,14 +379,11 @@ impl XmodemManager {
     }
 
     fn find_useful_bytes_in_packet(&self, data: &[u8], packet_num: u8) -> usize {
-        // if we know total count of packetys and this one is the last one
         if let (Some(total_packets), Some(last_bytes)) = (self.expected_total_packets, self.last_packet_useful_bytes) {
             if packet_num as u16 == total_packets {
                 return last_bytes;
             }
         }
-        
-        // just use all of 128 bytes
         DATA_SIZE
     }
 
