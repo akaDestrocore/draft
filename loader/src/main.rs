@@ -167,11 +167,36 @@ fn main() -> ! {
                         // Start firmware update
                         clear_screen(&mut uart);
                         uart.send_string("Update firmware using XMODEM - select target:\r\n");
-                        uart.send_string("'A' - Application\r\n");
-                        uart.send_string("'U' - Updater\r\n");
+                        uart.send_string("'1' - Updater\r\n");
+                        uart.send_string("'2' - Application\r\n");
                         boot_option = BootOption::SelectUpdateTarget;
                     },
-                    b'A' | b'a' => {
+                    b'1' => {
+                        if boot_option == BootOption::SelectUpdateTarget {
+                            // Start updater update
+                            clear_screen(&mut uart);
+                            uart.send_string("Updating updater...\r\n");
+                            uart.send_string("Send file using XMODEM protocol with CRC-16\r\n");
+                            firmware_target = UPDATER_ADDR;
+                            xmodem.start(firmware_target);
+                            update_in_progress = true;
+                            boot_option = BootOption::None;
+                            
+                            leds.set(0, true);  // Green - system alive
+                            leds.set(1, true);  // Orange - XMODEM active
+                            leds.set(2, false); // Red - no error
+                            leds.set(3, false); // Blue - no data received yet
+                            
+                            // send 'C'
+                            if let Some(response) = xmodem.get_response() {
+                                uart.send_byte(response);
+                            }
+                        } else {
+                            // invalid option in main menu
+                            display_menu(&mut uart);
+                        }
+                    },
+                    b'2' => {
                         if boot_option == BootOption::SelectUpdateTarget {
                             // Start application update
                             clear_screen(&mut uart);
@@ -192,15 +217,19 @@ fn main() -> ! {
                                 uart.send_byte(response);
                             }
                         } else {
-                            // directly boot application
-                            if check_application_valid(&mut uart) {
-                                uart.send_string("\r\nBooting application...\r\n");
-                                boot_option = BootOption::Application;
-                            } else {
-                                uart.send_string("\r\nValid application not found!\r\n");
-                                systick::wait_ms(systick::get_tick_ms(), 1500);
-                                display_menu(&mut uart);
-                            }
+                            // invalid option in main menu
+                            display_menu(&mut uart);
+                        }
+                    },
+                    b'A' | b'a' => {
+                        // directly boot application
+                        if check_application_valid(&mut uart) {
+                            uart.send_string("\r\nBooting application...\r\n");
+                            boot_option = BootOption::Application;
+                        } else {
+                            uart.send_string("\r\nValid application not found!\r\n");
+                            systick::wait_ms(systick::get_tick_ms(), 1500);
+                            display_menu(&mut uart);
                         }
                     },
                     b'I' => {
@@ -250,33 +279,14 @@ fn main() -> ! {
                     _ => {
                         if byte != 0 {
                             if boot_option == BootOption::SelectUpdateTarget {
-                                if byte == b'U' || byte == b'u' {
-                                    clear_screen(&mut uart);
-                                    uart.send_string("Updating updater...\r\n");
-                                    uart.send_string("Send file using XMODEM protocol with CRC-16\r\n");
-                                    firmware_target = UPDATER_ADDR;
-                                    xmodem.start(firmware_target);
-                                    update_in_progress = true;
-                                    boot_option = BootOption::None;
-                                    
-                                    leds.set(0, true);  // Green - system alive
-                                    leds.set(1, true);  // Orange - XMODEM active
-                                    leds.set(2, false); // Red - no error
-                                    leds.set(3, false); // Blue - no data received yet
-                                    
-                                    // send 'C'
-                                    if let Some(response) = xmodem.get_response() {
-                                        uart.send_byte(response);
-                                    }
-                                } else {
-                                    clear_screen(&mut uart);
-                                    uart.send_string("Invalid option, cancelled.\r\n");
-                                    boot_option = BootOption::None;
-                                    systick::wait_ms(systick::get_tick_ms(), 1500);
-                                    display_menu(&mut uart);
-                                }
+                                clear_screen(&mut uart);
+                                uart.send_string("\r\nInvalid option, cancelled.\r\n");
+                                boot_option = BootOption::None;
+                                systick::wait_ms(systick::get_tick_ms(), 1500);
+                                display_menu(&mut uart);
                             } else {
                                 // invalid option
+                                clear_screen(&mut uart);
                                 display_menu(&mut uart);
                             }
                         }
