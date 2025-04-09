@@ -75,6 +75,14 @@ impl ImageHeader {
     pub fn update_data_size(&mut self, size: u32) {
         self.data_size = size;
     }
+
+    pub fn update_vector_addr(&mut self, addr: u32) {
+        self.vector_addr = addr;
+    }
+
+    pub fn update_crc(&mut self, crc: u32) {
+        self.crc = crc;
+    }
 }
 
 // Shared memory

@@ -46,11 +46,33 @@ pub static mut SHARED_MEMORY: SharedMemory = SharedMemory::new();
 
 #[no_mangle]
 #[link_section = ".image_hdr"]
-pub static IMAGE_HEADER: ImageHeader = ImageHeader::new(
+pub static mut IMAGE_HEADER: ImageHeader = ImageHeader::new(
     IMAGE_TYPE_LOADER,
     IMAGE_MAGIC_LOADER,
     1, 0, 0
 );
+
+extern "C" {
+    static __firmware_size: u32;
+}
+
+fn calculate_crc32(start_addr: u32, size: u32) -> u32 {
+    let mut crc: u32 = 0xFFFFFFFF;
+    
+    for i in 0..size {
+        let byte: u8 = unsafe { *(start_addr as *const u8).offset(i as isize) };
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            if (crc & 1) != 0 {
+                crc = (crc >> 1) ^ 0xEDB88320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    
+    !crc
+}
 
 // ANSI escape
 fn clear_screen(uart: &mut UartManager) {
@@ -172,6 +194,22 @@ fn recover_from_xmodem(uart: &mut UartManager, leds: &mut Leds, block_enter: boo
 fn main() -> ! {
     let p: Peripherals = pac::Peripherals::take().unwrap();
     let mut cp: cortex_m::Peripherals = cortex_m::Peripherals::take().unwrap();
+
+    // update header
+    unsafe {
+        // get firmware size from linker script
+        let size: *const u32 = &__firmware_size as *const u32;
+        let firmware_size: u32 = *size;
+        let vector_addr: u32 = LOADER_ADDR + IMAGE_HDR_SIZE;
+        
+        IMAGE_HEADER.update_data_size(firmware_size);
+        IMAGE_HEADER.vector_addr = vector_addr;
+        
+        // calculate CRC
+        let firmware_start: u32 = LOADER_ADDR + IMAGE_HDR_SIZE;
+        // IMAGE_HEADER.crc = calculate_crc32(firmware_start, firmware_size);
+        IMAGE_HEADER.crc = 0;
+    }
 
     // Setup system clock to 90MHz
     setup_system_clock(&p);
