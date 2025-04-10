@@ -9,7 +9,7 @@ include!(concat!(env!("OUT_DIR"), "/header_values.rs"));
 use misc::{
     bootloader::{self, BootOption, BootConfig},
     xmodem::{XmodemManager, XmodemConfig, XmodemError, XmodemState, CAN},
-    image::{SharedMemory, IMAGE_MAGIC_UPDATER, IMAGE_TYPE_UPDATER},
+    image::{ImageHeader, SharedMemory, IMAGE_MAGIC_UPDATER, IMAGE_TYPE_UPDATER},
     systick,
 };
 use core::panic::PanicInfo;
