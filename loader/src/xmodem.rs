@@ -327,7 +327,7 @@ impl XmodemManager {
                     }
                 }
             }
-            
+
             // check if we are not getting out of the sector
             let next_addr: u32 = self.current_addr + useful_bytes as u32;
             let current_sector_end: u32 = self.current_sector_base + 0x20000;
@@ -346,8 +346,6 @@ impl XmodemManager {
                     }
                 }
             }
-            
-            breakpoint_anchor(1);
 
             // write only useful data to flash
             if useful_bytes > 0 {

@@ -321,8 +321,6 @@ pub fn write(p: &pac::Peripherals, source_data: &[u8], destination: u32) -> u8 {
 
         // No delay needed here
     }
-    
-    p.flash.cr().modify(|_, w| w.pg().clear_bit());
 
     // Lock flash
     lock(p);
