@@ -7,7 +7,7 @@ use cortex_m_rt::entry;
 use stm32f4 as pac;
 use misc::image::{ImageHeader, SharedMemory, IMAGE_MAGIC_UPDATER, IMAGE_TYPE_UPDATER};
 
-// Символы, определенные в линкер-скрипте
+// symbol from linker
 extern "C" {
     static __firmware_size: u32;
 }
@@ -17,17 +17,17 @@ extern "C" {
 pub static mut IMAGE_HEADER: ImageHeader = ImageHeader::new(
     IMAGE_TYPE_UPDATER,
     IMAGE_MAGIC_UPDATER,
-    1, 0, 0  // ver 1.0.0
+    1, 0, 0
 );
 
 #[entry]
 fn main() -> ! {
-    // Получаем размер прошивки из символа, определенного линкером
-    let firmware_size = unsafe {
-        let size = &__firmware_size as *const u32;
-        let size_value = *size;
+    // get firmware size from linker
+    let firmware_size: u32 = unsafe {
+        let size: *const u32 = &__firmware_size as *const u32;
+        let size_value: u32 = *size;
         
-        // Обновляем размер в заголовке
+        // update size in header
         IMAGE_HEADER.update_data_size(size_value);
         
         size_value

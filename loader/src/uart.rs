@@ -2,7 +2,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use misc::ring_buffer::RingBuffer;
 use stm32f4 as pac;
 
-// Статические буферы для UART-коммуникации
 static mut RX_BUFFER: RingBuffer = RingBuffer::new();
 static mut TX_BUFFER: RingBuffer = RingBuffer::new();
 static TX_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
@@ -26,30 +25,28 @@ impl<'a> UartManager<'a> {
     }
 
     pub fn init(&mut self) {
-        // Инициализация UART
+        // UART init
         unsafe {
-            // Настройка USART2 @ 115200 бод, 8-бит, 1 стоп-бит, без четности
-            self.usart2.brr().write(|w| w.bits(0xc3)); // 90MHz / 115200 ≈ 781.25 = 0xc3
+            // USART2 115200 baudrate, 8-bit, 1 stop bit, no parity
+            self.usart2.brr().write(|w| w.bits(0xc3)); // 90MHz / 115200 = 0xc3
             
-            // Включение USART2
+            // enable USART2
             self.usart2.cr1().modify(|_, w| {
-                w.ue().enabled()     // Включение USART
-                 .te().enabled()     // Включение передатчика
-                 .re().enabled()     // Включение приемника
-                 .rxneie().enabled() // Включение прерывания RXNE
+                w.ue().enabled()
+                 .te().enabled()
+                 .re().enabled()
+                 .rxneie().enabled() // enable RXNE interrupt
             });
         }
     }
 
     pub fn process(&mut self) {
-        // Проверка необходимости начать новую передачу
         if !TX_IN_PROGRESS.load(Ordering::SeqCst) {
             unsafe {
                 if let Some(byte) = TX_BUFFER.read() {
-                    // Запись байта в регистр данных
                     self.usart2.dr().write(|w| w.bits(byte as u16));
                     
-                    // Включение прерывания TXE
+                    // enbale TX interrupt
                     self.usart2.cr1().modify(|_, w| w.txeie().enabled());
                     
                     TX_IN_PROGRESS.store(true, Ordering::SeqCst);
@@ -65,7 +62,7 @@ impl<'a> UartManager<'a> {
     pub fn send_byte(&mut self, byte: u8) {
         unsafe {
             if !TX_BUFFER.write(byte) {
-                // Буфер полон, но мы не можем обрабатывать ошибки здесь
+                // buffer is full
                 return;
             }
         }
@@ -83,14 +80,14 @@ impl<'a> UartManager<'a> {
     }
 }
 
-// Эта функция вызывается из обработчика прерывания USART2
+// call this from USART2 irq handler
 #[no_mangle]
 pub extern "C" fn process_uart_interrupt() {
     use pac::Peripherals;
     
     let p = unsafe { Peripherals::steal() };
     
-    // Проверка RX
+    // Check RX
     if p.usart2.sr().read().rxne().bit_is_set() {
         let data = p.usart2.dr().read().bits() as u8;
         unsafe {
@@ -98,14 +95,14 @@ pub extern "C" fn process_uart_interrupt() {
         }
     }
     
-    // Проверка TX
+    // Check TX
     if p.usart2.sr().read().txe().bit_is_set() && p.usart2.cr1().read().txeie().bit_is_set() {
         unsafe {
             if let Some(byte) = TX_BUFFER.read() {
-                // Отправка следующего байта
+                // Send next byte
                 p.usart2.dr().write(|w| w.bits(byte as u16));
             } else {
-                // Больше нет данных для отправки, отключаем прерывание TXE
+                // No more data to send, disable TXE
                 p.usart2.cr1().modify(|_, w| w.txeie().disabled());
                 TX_IN_PROGRESS.store(false, Ordering::SeqCst);
             }

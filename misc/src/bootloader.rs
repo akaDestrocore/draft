@@ -1,31 +1,36 @@
+#![no_std]
+
 use core::ptr;
 use cortex_m::asm;
 use cortex_m::peripheral::SCB;
-use misc::image::{ImageHeader, IMAGE_MAGIC_APP, IMAGE_MAGIC_UPDATER, IMAGE_MAGIC_LOADER};
+use crate::image::{ImageHeader, IMAGE_MAGIC_APP, IMAGE_MAGIC_UPDATER, IMAGE_MAGIC_LOADER, IMAGE_TYPE_APP, IMAGE_TYPE_UPDATER, IMAGE_TYPE_LOADER};
 use stm32f4 as pac;
 
-use crate::{APP_ADDR, UPDATER_ADDR, LOADER_ADDR, IMAGE_HDR_SIZE};
-
-extern "C" {
-    static __firmware_size: u32;
+// Configuration structure for boot addresses
+#[derive(Clone, Copy)]
+pub struct BootConfig {
+    pub app_addr: u32,
+    pub updater_addr: u32,
+    pub loader_addr: u32,
+    pub image_hdr_size: u32,
 }
-
-use crate::IMAGE_HEADER;
 
 #[derive(PartialEq, Copy, Clone)]
 pub enum BootOption {
     None,
     Application,
     Updater,
+    Loader,
     SelectUpdateTarget,
 }
 
-pub fn is_firmware_valid(addr: u32) -> bool {
+pub fn is_firmware_valid(addr: u32, config: &BootConfig) -> bool {
     let header: ImageHeader = unsafe { ptr::read_volatile(addr as *const ImageHeader) };
     
     match addr {
-        addr if addr == APP_ADDR => header.image_magic == IMAGE_MAGIC_APP,
-        addr if addr == UPDATER_ADDR => header.image_magic == IMAGE_MAGIC_UPDATER,
+        addr if addr == config.app_addr => header.image_magic == IMAGE_MAGIC_APP,
+        addr if addr == config.updater_addr => header.image_magic == IMAGE_MAGIC_UPDATER,
+        addr if addr == config.loader_addr => header.image_magic == IMAGE_MAGIC_LOADER,
         _ => false,
     }
 }
@@ -114,7 +119,7 @@ fn reset_system_clock(p: &pac::Peripherals) {
 }
 
 /// Common boot code preparation
-fn prepare_boot(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals, addr: u32) {
+fn prepare_boot(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals, addr: u32, image_hdr_size: u32) {
     reset_system_clock(p);
     deinit_peripherals(p);
 
@@ -139,25 +144,25 @@ fn prepare_boot(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals, addr: u32)
         (*scb).shcsr.modify(|v: u32| v & !( (1 << 18) | (1 << 17) | (1 << 16) ));
 
         // Set vector table offset
-        (*scb).vtor.write(addr + IMAGE_HDR_SIZE);
+        (*scb).vtor.write(addr + image_hdr_size);
     }
 }
 
-pub fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
-    if !is_firmware_valid(APP_ADDR) {
+pub fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals, config: &BootConfig) -> ! {
+    if !is_firmware_valid(config.app_addr, config) {
         loop {
             asm::nop();
         }
     }
 
-    prepare_boot(p, cp, APP_ADDR);
+    prepare_boot(p, cp, config.app_addr, config.image_hdr_size);
 
     let stack_addr: u32 = unsafe {
-        ptr::read_volatile((APP_ADDR + IMAGE_HDR_SIZE) as *const u32)
+        ptr::read_volatile((config.app_addr + config.image_hdr_size) as *const u32)
     };
     
     let reset_vector: u32 = unsafe {
-        ptr::read_volatile((APP_ADDR + IMAGE_HDR_SIZE + 4) as *const u32)
+        ptr::read_volatile((config.app_addr + config.image_hdr_size + 4) as *const u32)
     };
 
     unsafe {
@@ -170,21 +175,21 @@ pub fn boot_application(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) ->
     }
 }
 
-pub fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
-    if !is_firmware_valid(UPDATER_ADDR) {
+pub fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals, config: &BootConfig) -> ! {
+    if !is_firmware_valid(config.updater_addr, config) {
         loop {
             asm::nop();
         }
     }
 
-    prepare_boot(p, cp, UPDATER_ADDR);
+    prepare_boot(p, cp, config.updater_addr, config.image_hdr_size);
 
     let stack_addr: u32 = unsafe {
-        ptr::read_volatile((UPDATER_ADDR + IMAGE_HDR_SIZE) as *const u32)
+        ptr::read_volatile((config.updater_addr + config.image_hdr_size) as *const u32)
     };
     
     let reset_vector: u32 = unsafe {
-        ptr::read_volatile((UPDATER_ADDR + IMAGE_HDR_SIZE + 4) as *const u32)
+        ptr::read_volatile((config.updater_addr + config.image_hdr_size + 4) as *const u32)
     };
 
     unsafe {
@@ -197,14 +202,41 @@ pub fn boot_updater(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals) -> ! {
     }
 }
 
-pub fn get_firmware_header(addr: u32) -> Option<ImageHeader> {
-    // Читаем заголовок из флеш-памяти
+pub fn boot_loader(p: &pac::Peripherals, cp: &mut cortex_m::Peripherals, config: &BootConfig) -> ! {
+    if !is_firmware_valid(config.loader_addr, config) {
+        loop {
+            asm::nop();
+        }
+    }
+
+    prepare_boot(p, cp, config.loader_addr, config.image_hdr_size);
+
+    let stack_addr: u32 = unsafe {
+        ptr::read_volatile((config.loader_addr + config.image_hdr_size) as *const u32)
+    };
+    
+    let reset_vector: u32 = unsafe {
+        ptr::read_volatile((config.loader_addr + config.image_hdr_size + 4) as *const u32)
+    };
+
+    unsafe {
+        // Set SP
+        core::arch::asm!("MSR msp, {0}", in(reg) stack_addr);
+
+        // Jump to reset handler
+        let jump_fn: extern "C" fn() -> ! = core::mem::transmute(reset_vector);
+        jump_fn();
+    }
+}
+
+pub fn get_firmware_header(addr: u32, config: &BootConfig) -> Option<ImageHeader> {
+    // Read header from flash memory
     let header: ImageHeader = unsafe { ptr::read_volatile(addr as *const ImageHeader) };
     
     match addr {
-        addr if addr == APP_ADDR && header.image_magic == IMAGE_MAGIC_APP => Some(header),
-        addr if addr == UPDATER_ADDR && header.image_magic == IMAGE_MAGIC_UPDATER => Some(header),
-        addr if addr == LOADER_ADDR && header.image_magic == IMAGE_MAGIC_LOADER => Some(header),
+        addr if addr == config.app_addr && header.image_magic == IMAGE_MAGIC_APP => Some(header),
+        addr if addr == config.updater_addr && header.image_magic == IMAGE_MAGIC_UPDATER => Some(header),
+        addr if addr == config.loader_addr && header.image_magic == IMAGE_MAGIC_LOADER => Some(header),
         _ => None,
     }
 }

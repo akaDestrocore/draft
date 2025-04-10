@@ -7,15 +7,15 @@ fn main() {
     println!("cargo:rerun-if-changed=memory.x");
     println!("cargo:rerun-if-changed=custom.x");
     
-    let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let out: &PathBuf = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
     
-    // Copy memory.x to the output directory
+    // copy memory.x to the output directory
     File::create(out.join("memory.x"))
         .unwrap()
         .write_all(include_bytes!("memory.x"))
         .unwrap();
         
-    // Create custom.x for our additional sections
+    // create custom.x for our additional sections
     File::create(out.join("custom.x"))
         .unwrap()
         .write_all(include_bytes!("custom.x"))

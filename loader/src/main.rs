@@ -1,26 +1,24 @@
 #![no_std]
 #![no_main]
 
-mod bootloader;
-mod xmodem;
-mod uart;
 mod led;
+mod uart;
 
 include!(concat!(env!("OUT_DIR"), "/header_values.rs"));
 
-use bootloader::{BootOption, boot_application, boot_updater};
+use misc::{
+    bootloader::{self, BootOption, BootConfig},
+    xmodem::{XmodemManager, XmodemConfig, XmodemError, XmodemState, CAN},
+    image::{SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER},
+    systick,
+};
 use core::panic::PanicInfo;
 use cortex_m::{asm, peripheral::SYST};
 use cortex_m_rt::{entry, exception};
 use led::Leds;
-use misc::{
-    image::{SharedMemory, IMAGE_MAGIC_LOADER, IMAGE_TYPE_LOADER},
-    systick,
-};
 use stm32f4 as pac;
 use stm32f4::Peripherals;
 use uart::{UartManager, UartError};
-use xmodem::{XmodemManager, XmodemError, XmodemState, CAN};
 
 // Flash memory addresses
 pub const UPDATER_ADDR: u32 = 0x08008000;
@@ -46,8 +44,8 @@ enum PostXmodemState {
 #[link_section = ".shared_memory"]
 pub static mut SHARED_MEMORY: SharedMemory = SharedMemory::new();
 
-extern "C" {
-    static __firmware_size: u32;
+unsafe extern "C" {
+    unsafe static __firmware_size: u32;
 }
 
 fn calculate_crc32(start_addr: u32, size: u32) -> u32 {
@@ -107,8 +105,8 @@ fn display_menu(uart: &mut UartManager) {
     }
 }
 
-fn check_application_valid(uart: &mut UartManager) -> bool {
-    bootloader::is_firmware_valid(APP_ADDR)
+fn check_application_valid(uart: &mut UartManager, boot_config: &BootConfig) -> bool {
+    bootloader::is_firmware_valid(APP_ADDR, boot_config)
 }
 
 // needed to work in ExtraPuTTY properly
@@ -189,6 +187,21 @@ fn main() -> ! {
     let p: Peripherals = pac::Peripherals::take().unwrap();
     let mut cp: cortex_m::Peripherals = cortex_m::Peripherals::take().unwrap();
 
+    // Create configuration objects
+    let boot_config: BootConfig = BootConfig {
+        app_addr: APP_ADDR,
+        updater_addr: UPDATER_ADDR,
+        loader_addr: LOADER_ADDR,
+        image_hdr_size: IMAGE_HDR_SIZE,
+    };
+    
+    let xmodem_config: XmodemConfig = XmodemConfig {
+        app_addr: APP_ADDR,
+        updater_addr: UPDATER_ADDR,
+        loader_addr: LOADER_ADDR,
+        image_hdr_size: IMAGE_HDR_SIZE,
+    };
+
     unsafe {
         // Get firmware size from linker script
         let size: *const u32 = &__firmware_size as *const u32;
@@ -197,7 +210,7 @@ fn main() -> ! {
         // Update only the size in the header
         IMAGE_HEADER.update_data_size(firmware_size);
         
-        // IMAGE_HEADER.crc
+        // TODO: IMAGE_HEADER.crc
     }
 
     // Setup system clock to 90MHz
@@ -216,7 +229,7 @@ fn main() -> ! {
     // Initialize peripherals
     let mut leds: Leds<'_> = Leds::new(&p);
     let mut uart: UartManager<'_> = UartManager::new(&p);
-    let mut xmodem: XmodemManager = XmodemManager::new();
+    let mut xmodem: XmodemManager = XmodemManager::new(xmodem_config);
 
     leds.init();
     uart.init();
@@ -267,7 +280,7 @@ fn main() -> ! {
                 match byte {
                     b'U' | b'u' => {
                         // updater
-                        if bootloader::is_firmware_valid(UPDATER_ADDR) {
+                        if bootloader::is_firmware_valid(UPDATER_ADDR, &boot_config) {
                             uart.send_string("\r\n Booting updater...\r\n");
                             boot_option = BootOption::Updater;
                         } else {
@@ -343,7 +356,7 @@ fn main() -> ! {
                         // loader
                         uart.send_string("Loader (this image) : ");
 
-                        if let Some(header) = bootloader::get_firmware_header(LOADER_ADDR) {
+                        if let Some(header) = bootloader::get_firmware_header(LOADER_ADDR, &boot_config) {
                             uart.send_string("Valid\r\n");
                             
                             uart.send_string("  Version: ");
@@ -377,7 +390,7 @@ fn main() -> ! {
                         
                         // app
                         uart.send_string("Application: ");
-                        if let Some(header) = bootloader::get_firmware_header(APP_ADDR) {
+                        if let Some(header) = bootloader::get_firmware_header(APP_ADDR, &boot_config) {
                             uart.send_string("Valid\r\n");
                             
                             uart.send_string("  Version: ");
@@ -411,7 +424,7 @@ fn main() -> ! {
                         
                         // updater
                         uart.send_string("Updater: ");
-                        if let Some(header) = bootloader::get_firmware_header(UPDATER_ADDR) {
+                        if let Some(header) = bootloader::get_firmware_header(UPDATER_ADDR, &boot_config) {
                             uart.send_string("Valid\r\n");
                             
                             uart.send_string("  Version: ");
@@ -469,7 +482,7 @@ fn main() -> ! {
                         if is_enter_blocked(current_time) {
                             // ignore Enter after update because of ExtraPuTTY sending '\r'
                         } else {
-                            if check_application_valid(&mut uart) {
+                            if check_application_valid(&mut uart, &boot_config) {
                                 uart.send_string("\r\n Booting application...\r\n");
                                 boot_option = BootOption::Application;
                             } else {
@@ -619,13 +632,13 @@ fn main() -> ! {
         // Handle boot options
         match boot_option {
             BootOption::Application => {
-                if check_application_valid(&mut uart) {
+                if check_application_valid(&mut uart, &boot_config) {
                     // wait for UART to finish sending
                     while !uart.is_tx_complete() {
                         uart.process();
                     }
                     clear_rx_buffer(&mut uart);
-                    boot_application(&p, &mut cp);
+                    bootloader::boot_application(&p, &mut cp, &boot_config);
                 } else {
                     clear_screen(&mut uart);
                     uart.send_string("\r\nApplication validation failed just before boot\r\n");
@@ -641,7 +654,7 @@ fn main() -> ! {
                 }
                 clear_rx_buffer(&mut uart);
                 
-                boot_updater(&p, &mut cp);
+                bootloader::boot_updater(&p, &mut cp, &boot_config);
             },
             _ => {}
         }
@@ -652,7 +665,7 @@ fn main() -> ! {
             let current_time: u32 = systick::get_tick_ms();
             
             if current_time.wrapping_sub(autoboot_timer) >= BOOT_TIMEOUT_MS {
-                if check_application_valid(&mut uart) {
+                if check_application_valid(&mut uart, &boot_config) {
                     uart.send_string("\r\n Auto-boot timeout reached. Booting application...\r\n");
                     
                     for _ in 0..5 {

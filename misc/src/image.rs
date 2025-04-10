@@ -1,8 +1,8 @@
 #![no_std]
 
-pub const IMAGE_MAGIC_LOADER: u32 = 0xDEADC0DE;    // "LOAD"
-pub const IMAGE_MAGIC_UPDATER: u32 = 0xFEEDFACE;   // "UPDT"
-pub const IMAGE_MAGIC_APP: u32 = 0xC0FFEE00;       // "APPL"
+pub const IMAGE_MAGIC_LOADER: u32 = 0xDEADC0DE;
+pub const IMAGE_MAGIC_UPDATER: u32 = 0xFEEDFACE;
+pub const IMAGE_MAGIC_APP: u32 = 0xC0FFEE00;
 
 pub const IMAGE_VERSION_CURRENT: u16 = 0x0100;
 
@@ -37,13 +37,13 @@ impl ImageHeader {
             version_minor: minor,
             version_patch: patch,
             _padding: 0,
-            vector_addr: 0, // Set later
-            crc: 0,         // Calculated later
-            data_size: 0,   // Calculated later
+            vector_addr: 0,
+            crc: 0,
+            data_size: 0,
         }
     }
     
-    /// Check if this image is valid
+    // Check if this image is valid
     pub fn is_valid(&self) -> bool {
         match self.image_type {
             IMAGE_TYPE_LOADER => self.image_magic == IMAGE_MAGIC_LOADER,
@@ -71,7 +71,7 @@ impl ImageHeader {
         self.version_patch > other.version_patch
     }
     
-    /// Update data size field in the header
+    // Update data size field in the header
     pub fn update_data_size(&mut self, size: u32) {
         self.data_size = size;
     }
