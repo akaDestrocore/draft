@@ -74,33 +74,8 @@ set(COMMON_INCLUDES
 )
 
 # Common driver sources
-set(COMMON_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_cortex.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_flash.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_flash_ex.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_flash_ramfunc.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_gpio.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dma.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dma_ex.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pwr.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pwr_ex.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_tim.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_tim_ex.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2c.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_spi.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_crc.c
-)
-
-# Common library sources
-set(COMMON_LIB_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/common/src/flash.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/common/src/crc.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/common/src/image.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/common/src/xmodem.c
+file(GLOB COMMON_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/src/*.c
 )
 
 # Create executables for each component
@@ -145,15 +120,6 @@ configure_target(loader)
 configure_target(updater)
 configure_target(application)
 
-# Add mbedTLS and JANPATCH src
-file(GLOB_RECURSE MBEDTLS_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/drivers/ThirdParty/mbedTLS/library/*.c"
-)
-
-file(GLOB_RECURSE JANPATCH_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/drivers/ThirdParty/JANPATCH/*.c"
-)
-
 # Set specific includes for each target
 target_include_directories(boot PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/boot/inc)
 target_include_directories(loader PRIVATE 
@@ -184,7 +150,6 @@ set_target_properties(application PROPERTIES LINK_FLAGS
 target_sources(boot PRIVATE
     ${BOOT_STARTUP_FILE}
     ${COMMON_SOURCES}
-    ${COMMON_LIB_SOURCES}
     ${CMAKE_CURRENT_SOURCE_DIR}/boot/src/main.c
     ${CMAKE_CURRENT_SOURCE_DIR}/boot/src/system_stm32f4xx.c
 )
@@ -192,27 +157,21 @@ target_sources(boot PRIVATE
 target_sources(loader PRIVATE
     ${LOADER_STARTUP_FILE}
     ${COMMON_SOURCES}
-    ${COMMON_LIB_SOURCES}
     ${CMAKE_CURRENT_SOURCE_DIR}/loader/src/main.c
     ${CMAKE_CURRENT_SOURCE_DIR}/loader/src/system_stm32f4xx.c
-    ${MBEDTLS_SOURCES}
 )
 
 target_sources(updater PRIVATE
     ${UPDATER_STARTUP_FILE}
     ${COMMON_SOURCES}
-    ${COMMON_LIB_SOURCES}
     ${CMAKE_CURRENT_SOURCE_DIR}/updater/src/main.c
     ${CMAKE_CURRENT_SOURCE_DIR}/updater/src/system_stm32f4xx.c
     ${CMAKE_CURRENT_SOURCE_DIR}/updater/src/updater_flash.c
-    ${MBEDTLS_SOURCES}
-    ${JANPATCH_SOURCES}
 )
 
 target_sources(application PRIVATE
     ${APP_STARTUP_FILE}
     ${COMMON_SOURCES}
-    ${COMMON_LIB_SOURCES}
     ${CMAKE_CURRENT_SOURCE_DIR}/application/src/main.c
     ${CMAKE_CURRENT_SOURCE_DIR}/application/src/system_stm32f4xx.c
 )
