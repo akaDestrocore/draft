@@ -1,7 +1,10 @@
 #ifndef _IMAGE_H
 #define _IMAGE_H
 
+#include "crc.h"
+#include "stm32f4xx_hal.h"
 #include <stdint.h>
+#include <string.h>
 
 // Magic numbers for each component
 #define IMAGE_MAGIC_LOADER    0xDEADC0DE

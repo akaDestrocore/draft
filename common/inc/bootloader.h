@@ -1,8 +1,10 @@
 #ifndef _BOOTLOADER_H
 #define _BOOTLOADER_H
 
-#include <stdint.h>
 #include "image.h"
+#include "flash.h"
+#include "stm32f4xx_hal.h"
+#include <stdint.h>
 
 // Boot configuration struct
 typedef struct {

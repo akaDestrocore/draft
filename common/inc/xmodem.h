@@ -1,8 +1,12 @@
 #ifndef _XMODEM_H
 #define _XMODEM_H
 
+#include "flash.h"
+#include "image.h"
+#include "stm32f4xx_hal.h"
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 
 // XMODEM consts
 #define XMODEM_SOH 0x01  // Start of header

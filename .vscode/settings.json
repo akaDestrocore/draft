@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "image.h": "c",
+        "string.h": "c",
+        "bootloader.h": "c",
+        "crc.h": "c",
+        "xmodem.h": "c",
+        "flash.h": "c"
+    }
+}
