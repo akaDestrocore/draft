@@ -55,4 +55,7 @@ XmodemState_t uart_transport_xmodem_state(void);
 Ring_Buffer_t* get_uart_rx_buffer(void);
 Ring_Buffer_t* get_uart_tx_buffer(void);
 
+// UART IRQ handler - must be called from the USART2_IRQHandler
+void uart_transport_irq_handler(void);
+
 #endif /* _UART_TRANSPORT_H */

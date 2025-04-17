@@ -11,6 +11,10 @@ typedef struct {
 
 static UARTTransport_State_t uart_state;
 
+void USART2_IRQHandler(void) {
+    uart_transport_irq_handler();
+}
+
 // Initialize UART transport
 int uart_transport_init(void* config) {
     UARTTransport_Config_t* uart_config = (UARTTransport_Config_t*)config;
