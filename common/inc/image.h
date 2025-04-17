@@ -22,7 +22,7 @@ typedef enum {
 
 // Image header struct
 typedef struct __attribute__((packed)) {
-    uint32_t image_magic;        // Magic number to identify the image type
+    uint32_t image_magic;        // Magic number (component-specific)
     uint16_t image_hdr_version;  // Header version
     uint8_t  image_type;         // Type of image
     uint8_t  version_major;      // Major version number
