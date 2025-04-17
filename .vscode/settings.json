@@ -5,6 +5,15 @@
         "bootloader.h": "c",
         "crc.h": "c",
         "xmodem.h": "c",
-        "flash.h": "c"
+        "flash.h": "c",
+        "fileio.h": "c",
+        "stddef.h": "c",
+        "delta_update.h": "c",
+        "vector": "cpp",
+        "gcm_gmac.h": "c",
+        "transport.h": "c",
+        "uart_transport.h": "c",
+        "i2c_transport.h": "c",
+        "command_handler.h": "c"
     }
 }

@@ -1,8 +1,11 @@
+#ifndef _SFIO_H
+#define _SFIO_H
+
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
-#include <updater_flash.h>
+#include "flash.h"
 
 typedef enum
 {
@@ -28,3 +31,4 @@ size_t sfio_fwrite(const void *ptr, size_t size, size_t count, sfio_stream_t *st
 
 int sfio_fseek(sfio_stream_t *stream, long int offset, int origin);
 
+#endif /* _SFIO_H */
