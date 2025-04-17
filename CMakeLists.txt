@@ -158,10 +158,13 @@ file(GLOB_RECURSE JANPATCH_SOURCES
 target_include_directories(boot PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/boot/inc)
 target_include_directories(loader PRIVATE 
     ${CMAKE_CURRENT_SOURCE_DIR}/loader/inc
+    ${CMAKE_CURRENT_SOURCE_DIR}/MBEDTLS/App
     ${CMAKE_CURRENT_SOURCE_DIR}/drivers/ThirdParty/mbedTLS/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/ThirdParty/JANPATCH
 )
 target_include_directories(updater PRIVATE 
     ${CMAKE_CURRENT_SOURCE_DIR}/updater/inc
+    ${CMAKE_CURRENT_SOURCE_DIR}/MBEDTLS/App
     ${CMAKE_CURRENT_SOURCE_DIR}/drivers/ThirdParty/mbedTLS/include
     ${CMAKE_CURRENT_SOURCE_DIR}/drivers/ThirdParty/JANPATCH
 )
@@ -222,18 +225,6 @@ foreach(TARGET boot loader updater application)
     )
 endforeach()
 
-# Add memory analysis
-foreach(TARGET boot loader updater application)
-    add_custom_command(TARGET ${TARGET} POST_BUILD
-        COMMAND echo "Memory analysis for ${TARGET}:"
-        COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/memap.py 
-            -t GCC_ARM 
-            ${CMAKE_BINARY_DIR}/${TARGET}.map
-            -d3
-        VERBATIM
-    )
-endforeach()
-
 # Patch headers and merge bin
 add_custom_target(patch_and_merge ALL
     DEPENDS boot loader updater application
@@ -252,20 +243,4 @@ add_custom_target(flash_boot
 add_custom_target(flash_full
     DEPENDS patch_and_merge
     COMMAND STM32_Programmer.sh -c port=swd mode=UR -d merged_firmware.bin 0x08000000 -v -hardRst
-)
-
-# Memory analysis target
-add_custom_target(memory_analysis
-    COMMAND echo "=== Memory analysis for all components ==="
-    COMMAND echo "\\nBootloader memory usage:"
-    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/memap.py -t GCC_ARM ${CMAKE_BINARY_DIR}/boot.map -d3
-    COMMAND echo "\\nLoader memory usage:"
-    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/memap.py -t GCC_ARM ${CMAKE_BINARY_DIR}/loader.map -d3
-    COMMAND echo "\\nUpdater memory usage:"
-    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/memap.py -t GCC_ARM ${CMAKE_BINARY_DIR}/updater.map -d3
-    COMMAND echo "\\nApplication memory usage:"
-    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/memap.py -t GCC_ARM ${CMAKE_BINARY_DIR}/application.map -d3
-    DEPENDS boot loader updater application
-    COMMENT "Analyzing memory usage for all components"
-    VERBATIM
 )
