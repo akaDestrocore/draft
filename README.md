@@ -4,7 +4,7 @@
 ![Encryption](https://img.shields.io/badge/Encryption_Library-MBEDTLS-cyan)
 ![Patching](https://img.shields.io/badge/Delta_Patch-JANPATCH-green)
 
-# STM32F4 Multi‑Stage Bootloader System (C)
+# STM32F4 Multi‑Stage Bootloader
 
 A complete C implementation of a four‑stage bootloader for STM32F4, featuring structured image headers, CRC32 validation, delta‑patch updates, AES‑128‑GCM encryption via mbedTLS, and support for UART/XMODEM, I²C, and SPI transports.
 
