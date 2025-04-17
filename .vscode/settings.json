@@ -1,7 +1,0 @@
-{
-    "files.associations": {
-        "image.h": "c",
-        "uart_transport.h": "c",
-        "xmodem.h": "c"
-    }
-}

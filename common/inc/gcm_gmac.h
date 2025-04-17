@@ -1,7 +1,7 @@
 #ifndef _GCM_GMAC_H
 #define _GCM_GMAC_H
 
-#include "mbedtls/gcm.h"
+#include <mbedtls/gcm.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>

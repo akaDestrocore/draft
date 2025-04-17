@@ -125,14 +125,16 @@ target_include_directories(boot PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/boot/inc)
 target_include_directories(loader PRIVATE 
     ${CMAKE_CURRENT_SOURCE_DIR}/loader/inc
     ${CMAKE_CURRENT_SOURCE_DIR}/MBEDTLS/App
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/ThirdParty/mbedTLS/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/ThirdParty/JANPATCH
+    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/Third_Party/mbedTLS/include/mbedtls
+    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/Third_Party/mbedTLS/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/Third_Party/JANPATCH
 )
 target_include_directories(updater PRIVATE 
     ${CMAKE_CURRENT_SOURCE_DIR}/updater/inc
     ${CMAKE_CURRENT_SOURCE_DIR}/MBEDTLS/App
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/ThirdParty/mbedTLS/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/ThirdParty/JANPATCH
+    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/Third_Party/mbedTLS/include/mbedtls
+    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/Third_Party/mbedTLS/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/Third_Party/JANPATCH
 )
 target_include_directories(application PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/application/inc)
 
@@ -151,29 +153,24 @@ target_sources(boot PRIVATE
     ${BOOT_STARTUP_FILE}
     ${COMMON_SOURCES}
     ${CMAKE_CURRENT_SOURCE_DIR}/boot/src/main.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/boot/src/system_stm32f4xx.c
 )
 
 target_sources(loader PRIVATE
     ${LOADER_STARTUP_FILE}
     ${COMMON_SOURCES}
     ${CMAKE_CURRENT_SOURCE_DIR}/loader/src/main.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/loader/src/system_stm32f4xx.c
 )
 
 target_sources(updater PRIVATE
     ${UPDATER_STARTUP_FILE}
     ${COMMON_SOURCES}
     ${CMAKE_CURRENT_SOURCE_DIR}/updater/src/main.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/updater/src/system_stm32f4xx.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/updater/src/updater_flash.c
 )
 
 target_sources(application PRIVATE
     ${APP_STARTUP_FILE}
     ${COMMON_SOURCES}
     ${CMAKE_CURRENT_SOURCE_DIR}/application/src/main.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/application/src/system_stm32f4xx.c
 )
 
 # Post-build commands
