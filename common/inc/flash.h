@@ -1,6 +1,8 @@
 #ifndef _FLASH_H
 #define _FLASH_H
 
+#include "stm32f4xx_hal.h"
+#include <string.h>
 #include <stdint.h>
 #include <stddef.h>
 
