@@ -21,6 +21,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "stm32f4xx_ll_bus.h"
+#include "stm32f4xx_ll_gpio.h"
 #include "image.h"
 #include <stdint.h>
 #include <stdbool.h>

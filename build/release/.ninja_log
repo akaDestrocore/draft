@@ -1,3 +1,4 @@
 # ninja log v5
-0	3	0	clean	f3b3dde200944193
-0	4	1744980148980516195	CMakeFiles/boot.dir/boot/startup/startup_stm32f407vgtx.s.obj	43e9cd961fbd3c74
+1	3	0	clean	f3b3dde200944193
+0	4	1744982719670156994	CMakeFiles/boot.dir/boot/startup/startup_stm32f407vgtx.s.obj	43e9cd961fbd3c74
+0	39	1744982719700156989	CMakeFiles/boot.dir/boot/src/main.c.obj	880531094cac6a3b
