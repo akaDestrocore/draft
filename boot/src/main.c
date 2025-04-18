@@ -51,7 +51,7 @@
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 /* USER CODE BEGIN PFP */
-
+void Error_Handler(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -62,7 +62,7 @@ static void boot_to_image(uint32_t addr) {
 
   // get SP and reset vector
   uint32_t stack_addr = *((uint32_t*)(vector_addr));
-  uint32_t reset_vector = *((uint32_t*)(vectors_addr + 4));
+  uint32_t reset_vector = *((uint32_t*)(vector_addr + 4));
 
   HAL_RCC_DeInit();
   HAL_DeInit();
@@ -81,7 +81,7 @@ static void boot_to_image(uint32_t addr) {
                     SCB_SHCSR_MEMFAULTENA_Msk ) ;
 
   // Move vector table to the new address
-  SCB->VTOR = (uint32_t)vectors_addr;
+  SCB->VTOR = (uint32_t)vector_addr;
 
   // Set main SP
   __set_MSP(*(volatile uint32_t*)stack_addr);
@@ -121,8 +121,6 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_USART2_UART_Init();
-  MX_CRC_Init();
   /* USER CODE BEGIN 2 */
 
   ImageHeader_t header;

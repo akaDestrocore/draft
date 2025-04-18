@@ -1,0 +1,14 @@
+[
+{
+  "directory": "/home/destrocore/VS_WORKSPACE/draft/build/release",
+  "command": "/usr/sbin/arm-none-eabi-gcc -DBOOT_PROJECT -DSTM32F407xx -DUSE_HAL_DRIVER -I/home/destrocore/VS_WORKSPACE/draft/drivers/STM32F4xx_HAL_Driver/Inc -I/home/destrocore/VS_WORKSPACE/draft/drivers/STM32F4xx_HAL_Driver/Inc/Legacy -I/home/destrocore/VS_WORKSPACE/draft/drivers/CMSIS/Device/ST/STM32F4xx/Include -I/home/destrocore/VS_WORKSPACE/draft/drivers/CMSIS/Include -I/home/destrocore/VS_WORKSPACE/draft/boot/inc -I/home/destrocore/VS_WORKSPACE/draft/common/inc -O3 -DNDEBUG -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard -Wall -Wextra -Wno-unused-parameter -ffunction-sections -fdata-sections -fstack-usage -fno-builtin -Os -g0 -o CMakeFiles/boot.dir/boot/startup/startup_stm32f407vgtx.s.obj -c /home/destrocore/VS_WORKSPACE/draft/boot/startup/startup_stm32f407vgtx.s",
+  "file": "/home/destrocore/VS_WORKSPACE/draft/boot/startup/startup_stm32f407vgtx.s",
+  "output": "CMakeFiles/boot.dir/boot/startup/startup_stm32f407vgtx.s.obj"
+},
+{
+  "directory": "/home/destrocore/VS_WORKSPACE/draft/build/release",
+  "command": "/usr/sbin/arm-none-eabi-gcc -DBOOT_PROJECT -DSTM32F407xx -DUSE_HAL_DRIVER -I/home/destrocore/VS_WORKSPACE/draft/drivers/STM32F4xx_HAL_Driver/Inc -I/home/destrocore/VS_WORKSPACE/draft/drivers/STM32F4xx_HAL_Driver/Inc/Legacy -I/home/destrocore/VS_WORKSPACE/draft/drivers/CMSIS/Device/ST/STM32F4xx/Include -I/home/destrocore/VS_WORKSPACE/draft/drivers/CMSIS/Include -I/home/destrocore/VS_WORKSPACE/draft/boot/inc -I/home/destrocore/VS_WORKSPACE/draft/common/inc -fdata-sections -ffunction-sections --specs=nano.specs -Wl,--gc-sections -O3 -DNDEBUG -std=gnu11 -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard -Wall -Wextra -Wno-unused-parameter -ffunction-sections -fdata-sections -fstack-usage -fno-builtin -Os -g0 -o CMakeFiles/boot.dir/boot/src/main.c.obj -c /home/destrocore/VS_WORKSPACE/draft/boot/src/main.c",
+  "file": "/home/destrocore/VS_WORKSPACE/draft/boot/src/main.c",
+  "output": "CMakeFiles/boot.dir/boot/src/main.c.obj"
+}
+]
