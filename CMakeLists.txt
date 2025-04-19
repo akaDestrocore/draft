@@ -93,6 +93,10 @@ set(BOOT_SOURCES
     ${BOOT_STARTUP_FILE}
     ${CMAKE_CURRENT_SOURCE_DIR}/boot/src/main.c
     ${CMAKE_CURRENT_SOURCE_DIR}/boot/src/system_stm32f4xx.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/${MCU_FAMILY}_HAL_Driver/Src/stm32f4xx_hal.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/${MCU_FAMILY}_HAL_Driver/Src/stm32f4xx_hal_cortex.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/${MCU_FAMILY}_HAL_Driver/Src/stm32f4xx_hal_rcc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/${MCU_FAMILY}_HAL_Driver/Src/stm32f4xx_hal_rcc_ex.c
 )
 
 target_compile_options(boot PRIVATE ${COMMON_FLAGS})
@@ -123,6 +127,7 @@ set(LOADER_UPDATER_INCLUDES
 # Общие исходные файлы для loader и updater
 file(GLOB COMMON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/common/src/*.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/${MCU_FAMILY}_HAL_Driver/Src/*.c
 )
 
 # Filter out I2C and SPI transport files
