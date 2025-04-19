@@ -72,7 +72,7 @@ set(DRIVER_INCLUDES
 
 # Create executable only for boot
 add_executable(boot)
-# add_executable(loader)
+add_executable(loader)
 # add_executable(updater)
 # add_executable(application)
 
@@ -92,7 +92,7 @@ set(BOOT_INCLUDES
 set(BOOT_SOURCES
     ${BOOT_STARTUP_FILE}
     ${CMAKE_CURRENT_SOURCE_DIR}/boot/src/main.c
-    # Добавьте здесь только необходимые файлы из common, если нужно
+    ${CMAKE_CURRENT_SOURCE_DIR}/boot/src/system_stm32f4xx.c
 )
 
 target_compile_options(boot PRIVATE ${COMMON_FLAGS})
@@ -106,46 +106,47 @@ target_sources(boot PRIVATE ${BOOT_SOURCES})
 #############################################################
 #### НАСТРОЙКИ ДЛЯ LOADER И UPDATER (ЗАКОММЕНТИРОВАНО)
 #############################################################
-# 
-# # Loader and updater project settings
-# set(LOADER_STARTUP_FILE "${CMAKE_CURRENT_SOURCE_DIR}/loader/startup/startup_stm32f407vgtx.s")
-# set(UPDATER_STARTUP_FILE "${CMAKE_CURRENT_SOURCE_DIR}/updater/startup/startup_stm32f407vgtx.s")
-# 
-# set(LOADER_UPDATER_INCLUDES
-#     ${DRIVER_INCLUDES}
-#     ${CMAKE_CURRENT_SOURCE_DIR}/common/inc
-#     ${CMAKE_CURRENT_SOURCE_DIR}/MBEDTLS/App
-#     ${CMAKE_CURRENT_SOURCE_DIR}/drivers/Third_Party/mbedTLS/include/mbedtls
-#     ${CMAKE_CURRENT_SOURCE_DIR}/drivers/Third_Party/mbedTLS/include
-#     ${CMAKE_CURRENT_SOURCE_DIR}/drivers/Third_Party/JANPATCH
-# )
-# 
-# # Общие исходные файлы для loader и updater
-# file(GLOB COMMON_SOURCES
-#     ${CMAKE_CURRENT_SOURCE_DIR}/common/src/*.c
-# )
-# 
-# # Настройки для loader
-# target_compile_options(loader PRIVATE ${COMMON_FLAGS})
-# target_include_directories(loader PRIVATE 
-#     ${LOADER_UPDATER_INCLUDES} 
-#     ${CMAKE_CURRENT_SOURCE_DIR}/loader/inc
-# )
-# target_compile_definitions(loader PRIVATE 
-#     "USE_HAL_DRIVER" 
-#     ${MCU_MODEL} 
-#     "LOADER_PROJECT" 
-#     "MBEDTLS_CONFIG_FILE=<mbedtls_config.h>"
-# )
-# target_link_options(loader PRIVATE ${COMMON_LINKER_FLAGS})
-# set_target_properties(loader PROPERTIES LINK_FLAGS 
-#     "-T${CMAKE_CURRENT_SOURCE_DIR}/linker/STM32F407VGTx_FLASH_LOADER.ld -Wl,-Map=${CMAKE_BINARY_DIR}/loader.map")
-# target_sources(loader PRIVATE
-#     ${LOADER_STARTUP_FILE}
-#     ${COMMON_SOURCES}
-#     ${CMAKE_CURRENT_SOURCE_DIR}/loader/src/main.c
-# )
-# 
+
+# Loader and updater project settings
+set(LOADER_STARTUP_FILE "${CMAKE_CURRENT_SOURCE_DIR}/loader/startup/startup_stm32f407vgtx.s")
+set(UPDATER_STARTUP_FILE "${CMAKE_CURRENT_SOURCE_DIR}/updater/startup/startup_stm32f407vgtx.s")
+
+set(LOADER_UPDATER_INCLUDES
+    ${DRIVER_INCLUDES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/inc
+    ${CMAKE_CURRENT_SOURCE_DIR}/MBEDTLS/App
+    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/Third_Party/mbedTLS/include/mbedtls
+    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/Third_Party/mbedTLS/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/drivers/Third_Party/JANPATCH
+)
+
+# Общие исходные файлы для loader и updater
+file(GLOB COMMON_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/src/*.c
+)
+
+# Настройки для loader
+target_compile_options(loader PRIVATE ${COMMON_FLAGS})
+target_include_directories(loader PRIVATE 
+    ${LOADER_UPDATER_INCLUDES} 
+    ${CMAKE_CURRENT_SOURCE_DIR}/loader/inc
+)
+target_compile_definitions(loader PRIVATE 
+    "USE_HAL_DRIVER" 
+    ${MCU_MODEL} 
+    "LOADER_PROJECT" 
+    "MBEDTLS_CONFIG_FILE=<mbedtls_config.h>"
+)
+target_link_options(loader PRIVATE ${COMMON_LINKER_FLAGS})
+set_target_properties(loader PROPERTIES LINK_FLAGS 
+    "-T${CMAKE_CURRENT_SOURCE_DIR}/linker/STM32F407VGTx_FLASH_LOADER.ld -Wl,-Map=${CMAKE_BINARY_DIR}/loader.map")
+target_sources(loader PRIVATE
+    ${LOADER_STARTUP_FILE}
+    ${COMMON_SOURCES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/loader/src/main.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/boot/src/system_stm32f4xx.c
+)
+
 # # Настройки для updater
 # target_compile_options(updater PRIVATE ${COMMON_FLAGS})
 # target_include_directories(updater PRIVATE 

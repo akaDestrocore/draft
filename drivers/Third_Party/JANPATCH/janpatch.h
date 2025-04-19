@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <simple_fileio.h>
+#include <fileio.h>
 #include <ring_buffer.h>
 
 #define JANPATCH_STREAM sfio_stream_t

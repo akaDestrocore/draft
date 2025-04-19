@@ -36,7 +36,7 @@ void boot_updater(const BootConfig_t* config);
 void boot_loader(const BootConfig_t* config);
 
 // Get image header
-int get_firmware_header(uint32_t addr, const BootConfig_t* config, ImageHeader* header);
+int get_firmware_header(uint32_t addr, const BootConfig_t* config, ImageHeader_t* header);
 
 // Initialize system clock and peripherals before booting
 void prepare_for_boot(uint32_t addr, uint32_t header_size);

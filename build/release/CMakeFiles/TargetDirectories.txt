@@ -1,4 +1,5 @@
 /home/destrocore/VS_WORKSPACE/draft/build/release/CMakeFiles/boot.dir
+/home/destrocore/VS_WORKSPACE/draft/build/release/CMakeFiles/loader.dir
 /home/destrocore/VS_WORKSPACE/draft/build/release/CMakeFiles/flash_boot.dir
 /home/destrocore/VS_WORKSPACE/draft/build/release/CMakeFiles/edit_cache.dir
 /home/destrocore/VS_WORKSPACE/draft/build/release/CMakeFiles/rebuild_cache.dir

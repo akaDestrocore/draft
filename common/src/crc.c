@@ -1,4 +1,5 @@
 #include "image.h"
+#include "flash.h"
 
 void crc_init(void) {
     __HAL_RCC_CRC_CLK_ENABLE();

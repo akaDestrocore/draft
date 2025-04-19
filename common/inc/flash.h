@@ -6,9 +6,6 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// Flash base address
-#define FLASH_BASE 0x08000000
-
 int flash_unlock(void);
 void flash_lock(void);
 int flash_wait_for_last_operation(void);

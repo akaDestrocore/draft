@@ -2,7 +2,7 @@
 	"artifacts" : 
 	[
 		{
-			"path" : "boot.elf"
+			"path" : "loader.elf"
 		}
 	],
 	"backtrace" : 1,
@@ -29,37 +29,37 @@
 			{
 				"command" : 0,
 				"file" : 0,
-				"line" : 74,
+				"line" : 75,
 				"parent" : 0
 			},
 			{
 				"command" : 1,
 				"file" : 0,
-				"line" : 101,
+				"line" : 140,
 				"parent" : 0
 			},
 			{
 				"command" : 2,
 				"file" : 0,
-				"line" : 98,
+				"line" : 129,
 				"parent" : 0
 			},
 			{
 				"command" : 3,
 				"file" : 0,
-				"line" : 100,
+				"line" : 134,
 				"parent" : 0
 			},
 			{
 				"command" : 4,
 				"file" : 0,
-				"line" : 99,
+				"line" : 130,
 				"parent" : 0
 			},
 			{
 				"command" : 5,
 				"file" : 0,
-				"line" : 104,
+				"line" : 143,
 				"parent" : 0
 			}
 		]
@@ -129,7 +129,11 @@
 			[
 				{
 					"backtrace" : 4,
-					"define" : "BOOT_PROJECT"
+					"define" : "LOADER_PROJECT"
+				},
+				{
+					"backtrace" : 4,
+					"define" : "MBEDTLS_CONFIG_FILE=<mbedtls_config.h>"
 				},
 				{
 					"backtrace" : 4,
@@ -160,11 +164,27 @@
 				},
 				{
 					"backtrace" : 5,
-					"path" : "/home/destrocore/VS_WORKSPACE/draft/boot/inc"
+					"path" : "/home/destrocore/VS_WORKSPACE/draft/common/inc"
 				},
 				{
 					"backtrace" : 5,
-					"path" : "/home/destrocore/VS_WORKSPACE/draft/common/inc"
+					"path" : "/home/destrocore/VS_WORKSPACE/draft/MBEDTLS/App"
+				},
+				{
+					"backtrace" : 5,
+					"path" : "/home/destrocore/VS_WORKSPACE/draft/drivers/Third_Party/mbedTLS/include/mbedtls"
+				},
+				{
+					"backtrace" : 5,
+					"path" : "/home/destrocore/VS_WORKSPACE/draft/drivers/Third_Party/mbedTLS/include"
+				},
+				{
+					"backtrace" : 5,
+					"path" : "/home/destrocore/VS_WORKSPACE/draft/drivers/Third_Party/JANPATCH"
+				},
+				{
+					"backtrace" : 5,
+					"path" : "/home/destrocore/VS_WORKSPACE/draft/loader/inc"
 				}
 			],
 			"language" : "ASM",
@@ -236,7 +256,11 @@
 			[
 				{
 					"backtrace" : 4,
-					"define" : "BOOT_PROJECT"
+					"define" : "LOADER_PROJECT"
+				},
+				{
+					"backtrace" : 4,
+					"define" : "MBEDTLS_CONFIG_FILE=<mbedtls_config.h>"
 				},
 				{
 					"backtrace" : 4,
@@ -267,11 +291,27 @@
 				},
 				{
 					"backtrace" : 5,
-					"path" : "/home/destrocore/VS_WORKSPACE/draft/boot/inc"
+					"path" : "/home/destrocore/VS_WORKSPACE/draft/common/inc"
 				},
 				{
 					"backtrace" : 5,
-					"path" : "/home/destrocore/VS_WORKSPACE/draft/common/inc"
+					"path" : "/home/destrocore/VS_WORKSPACE/draft/MBEDTLS/App"
+				},
+				{
+					"backtrace" : 5,
+					"path" : "/home/destrocore/VS_WORKSPACE/draft/drivers/Third_Party/mbedTLS/include/mbedtls"
+				},
+				{
+					"backtrace" : 5,
+					"path" : "/home/destrocore/VS_WORKSPACE/draft/drivers/Third_Party/mbedTLS/include"
+				},
+				{
+					"backtrace" : 5,
+					"path" : "/home/destrocore/VS_WORKSPACE/draft/drivers/Third_Party/JANPATCH"
+				},
+				{
+					"backtrace" : 5,
+					"path" : "/home/destrocore/VS_WORKSPACE/draft/loader/inc"
 				}
 			],
 			"language" : "C",
@@ -285,11 +325,25 @@
 			},
 			"sourceIndexes" : 
 			[
-				1
+				1,
+				2,
+				3,
+				4,
+				5,
+				6,
+				7,
+				8,
+				9,
+				10,
+				11,
+				12,
+				13,
+				14,
+				15
 			]
 		}
 	],
-	"id" : "boot::@6890427a1f51a3e7e1df",
+	"id" : "loader::@6890427a1f51a3e7e1df",
 	"link" : 
 	{
 		"commandFragments" : 
@@ -299,7 +353,7 @@
 				"role" : "flags"
 			},
 			{
-				"fragment" : "-T/home/destrocore/VS_WORKSPACE/draft/linker/STM32F407VGTx_FLASH_BOOT.ld -Wl,-Map=/home/destrocore/VS_WORKSPACE/draft/build/release/boot.map",
+				"fragment" : "-T/home/destrocore/VS_WORKSPACE/draft/linker/STM32F407VGTx_FLASH_LOADER.ld -Wl,-Map=/home/destrocore/VS_WORKSPACE/draft/build/release/loader.map",
 				"role" : "flags"
 			},
 			{
@@ -360,8 +414,8 @@
 		],
 		"language" : "C"
 	},
-	"name" : "boot",
-	"nameOnDisk" : "boot.elf",
+	"name" : "loader",
+	"nameOnDisk" : "loader.elf",
 	"paths" : 
 	{
 		"build" : ".",
@@ -380,7 +434,21 @@
 			"name" : "Source Files",
 			"sourceIndexes" : 
 			[
-				1
+				1,
+				2,
+				3,
+				4,
+				5,
+				6,
+				7,
+				8,
+				9,
+				10,
+				11,
+				12,
+				13,
+				14,
+				15
 			]
 		}
 	],
@@ -389,13 +457,97 @@
 		{
 			"backtrace" : 6,
 			"compileGroupIndex" : 0,
-			"path" : "boot/startup/startup_stm32f407vgtx.s",
+			"path" : "loader/startup/startup_stm32f407vgtx.s",
 			"sourceGroupIndex" : 0
 		},
 		{
 			"backtrace" : 6,
 			"compileGroupIndex" : 1,
-			"path" : "boot/src/main.c",
+			"path" : "common/src/bootloader.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 6,
+			"compileGroupIndex" : 1,
+			"path" : "common/src/command_handler.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 6,
+			"compileGroupIndex" : 1,
+			"path" : "common/src/crc.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 6,
+			"compileGroupIndex" : 1,
+			"path" : "common/src/delta_update.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 6,
+			"compileGroupIndex" : 1,
+			"path" : "common/src/flash.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 6,
+			"compileGroupIndex" : 1,
+			"path" : "common/src/gcm_gmac.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 6,
+			"compileGroupIndex" : 1,
+			"path" : "common/src/i2c_transport.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 6,
+			"compileGroupIndex" : 1,
+			"path" : "common/src/image.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 6,
+			"compileGroupIndex" : 1,
+			"path" : "common/src/ring_buffer.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 6,
+			"compileGroupIndex" : 1,
+			"path" : "common/src/spi_transport.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 6,
+			"compileGroupIndex" : 1,
+			"path" : "common/src/transport.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 6,
+			"compileGroupIndex" : 1,
+			"path" : "common/src/uart_transport.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 6,
+			"compileGroupIndex" : 1,
+			"path" : "common/src/xmodem.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 6,
+			"compileGroupIndex" : 1,
+			"path" : "loader/src/main.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 6,
+			"compileGroupIndex" : 1,
+			"path" : "boot/src/system_stm32f4xx.c",
 			"sourceGroupIndex" : 1
 		}
 	],

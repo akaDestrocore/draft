@@ -3,8 +3,8 @@
 
 #include "stm32f4xx.h"
 #include "stm32f4xx_hal.h"
+#include "stm32f4xx_ll_gpio.h"
 #include <stdint.h>
-#include <string.h>
 
 // Memory addresses
 #define BOOT_ADDR       0x08000000
@@ -13,12 +13,15 @@
 #define APP_ADDR        0x08020000
 #define IMAGE_HDR_SIZE  0x200
 
-// LED Pins (STM32F4-Discovery)
-#define LED_GREEN_PIN   GPIO_PIN_12  // PD12
-#define LED_ORANGE_PIN  GPIO_PIN_13  // PD13
-#define LED_RED_PIN     GPIO_PIN_14  // PD14
-#define LED_BLUE_PIN    GPIO_PIN_15  // PD15
-#define LED_PORT        GPIOD
+// LED Pins
+#define GREEN_Pin LL_GPIO_PIN_12
+#define GREEN_GPIO_Port GPIOD
+#define ORANGE_Pin LL_GPIO_PIN_13
+#define ORANGE_GPIO_Port GPIOD
+#define RED_Pin LL_GPIO_PIN_14
+#define RED_GPIO_Port GPIOD
+#define BLUE_Pin LL_GPIO_PIN_15
+#define BLUE_GPIO_Port GPIOD
 
 // UART definitions
 #define UART_TX_PIN     GPIO_PIN_2   // PA2
@@ -30,9 +33,5 @@
 #define BOOT_TIMEOUT_MS       10000
 #define UART_TIMEOUT_MS       1000
 #define XMODEM_TIMEOUT_MS     5000
-
-// Utility macros
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 #endif // _MAIN_H

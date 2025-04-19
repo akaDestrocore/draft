@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "main.h": "c",
+        "random": "c",
+        "image.h": "c"
+    }
+}

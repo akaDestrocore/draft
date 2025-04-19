@@ -16,7 +16,8 @@
 					"targetIndexes" : 
 					[
 						0,
-						1
+						1,
+						2
 					]
 				}
 			],
@@ -32,7 +33,8 @@
 					"targetIndexes" : 
 					[
 						0,
-						1
+						1,
+						2
 					]
 				}
 			],
@@ -41,15 +43,22 @@
 				{
 					"directoryIndex" : 0,
 					"id" : "boot::@6890427a1f51a3e7e1df",
-					"jsonFile" : "target-boot-Release-60e681feccf915da2ec7.json",
+					"jsonFile" : "target-boot-Release-12426387079fa4875fdd.json",
 					"name" : "boot",
 					"projectIndex" : 0
 				},
 				{
 					"directoryIndex" : 0,
 					"id" : "flash_boot::@6890427a1f51a3e7e1df",
-					"jsonFile" : "target-flash_boot-Release-3c17bafdc818f5e2de48.json",
+					"jsonFile" : "target-flash_boot-Release-ad006aedb00c65022ff0.json",
 					"name" : "flash_boot",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "loader::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-loader-Release-51f6791abe53df0dbae0.json",
+					"name" : "loader",
 					"projectIndex" : 0
 				}
 			]

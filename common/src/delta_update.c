@@ -53,7 +53,7 @@ int apply_delta_patch(uint32_t source_addr, uint32_t patch_addr, uint32_t target
     target.slot = target_addr;
     
     // Apply the patch
-    return janpatch(&ctx, &source, &patch, &target);
+    return janpatch(ctx, &source, &patch, &target);
 }
 
 int verify_patched_firmware(uint32_t target_addr, uint32_t header_size) {
