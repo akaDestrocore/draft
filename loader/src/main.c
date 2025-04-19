@@ -69,22 +69,6 @@ typedef enum {
 #define APP_ADDR        0x08020000
 #define IMAGE_HDR_SIZE  0x200
 
-// Boot options
-typedef enum {
-    BOOT_OPTION_NONE,
-    BOOT_OPTION_APPLICATION,
-    BOOT_OPTION_UPDATER,
-    BOOT_OPTION_LOADER,
-    BOOT_OPTION_SELECT_UPDATE_TARGET
-} BootOption_t;
-
-// Shared memory structure
-typedef struct {
-    uint8_t target_image_type;
-    bool update_requested;
-    uint8_t reserved[62];
-} SharedMemory_t;
-
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -93,7 +77,6 @@ typedef struct {
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 // Shared memory
@@ -156,6 +139,7 @@ static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_CRC_Init(void);
 /* USER CODE BEGIN PFP */
+void Error_Handler(void);
 // UI functions
 void clear_screen(void);
 void display_menu(void);
@@ -473,11 +457,6 @@ void setup_gpio_pins(void) {
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-}
-
-// UART interrupt handler
-void USART2_IRQHandler(void) {
-    uart_transport_irq_handler();
 }
 /* USER CODE END 0 */
 

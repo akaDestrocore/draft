@@ -1,11 +1,10 @@
 #ifndef _UART_TRANSPORT_H
 #define _UART_TRANSPORT_H
 
+#include "stm32f4xx_ll_usart.h"
 #include "transport.h"
 #include "xmodem.h"
 #include "ring_buffer.h"
-#include "stm32f4xx_hal.h"
-#include "stm32f4xx_ll_usart.h"
 #include <string.h>
 
 // UART transport configuration

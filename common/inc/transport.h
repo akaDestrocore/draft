@@ -2,8 +2,8 @@
 #define _TRANSPORT_H
 
 #include "uart_transport.h"
-#include "i2c_transport.h"
-#include "spi_transport.h"
+// #include "i2c_transport.h"
+// #include "spi_transport.h"
 #include <string.h>
 #include <stdint.h>
 #include <stddef.h>

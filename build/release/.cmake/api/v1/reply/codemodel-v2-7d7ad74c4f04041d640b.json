@@ -50,14 +50,14 @@
 				{
 					"directoryIndex" : 0,
 					"id" : "flash_boot::@6890427a1f51a3e7e1df",
-					"jsonFile" : "target-flash_boot-Release-ad006aedb00c65022ff0.json",
+					"jsonFile" : "target-flash_boot-Release-7e29e5a8ad5e29693d45.json",
 					"name" : "flash_boot",
 					"projectIndex" : 0
 				},
 				{
 					"directoryIndex" : 0,
 					"id" : "loader::@6890427a1f51a3e7e1df",
-					"jsonFile" : "target-loader-Release-51f6791abe53df0dbae0.json",
+					"jsonFile" : "target-loader-Release-b0b18a6406b2d946021d.json",
 					"name" : "loader",
 					"projectIndex" : 0
 				}

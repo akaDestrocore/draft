@@ -14,7 +14,7 @@ int transport_init(Transport_t* transport, TransportType_t type, void* config) {
             transport->process = uart_transport_process;
             transport->deinit = uart_transport_deinit;
             break;
-            
+        /*
         case TRANSPORT_I2C:
             transport->init = i2c_transport_init;
             transport->send = i2c_transport_send;
@@ -30,7 +30,7 @@ int transport_init(Transport_t* transport, TransportType_t type, void* config) {
             transport->process = spi_transport_process;
             transport->deinit = spi_transport_deinit;
             break;
-            
+        */
         default:
             return -1; // Invalid transport type
     }

@@ -3,6 +3,7 @@
 
 #include "stm32f4xx.h"
 #include "stm32f4xx_hal.h"
+#include "stm32f4xx_ll_bus.h"
 #include "stm32f4xx_ll_gpio.h"
 #include <stdint.h>
 

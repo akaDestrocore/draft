@@ -125,6 +125,11 @@ file(GLOB COMMON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/common/src/*.c
 )
 
+# Filter out I2C and SPI transport files
+list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*i2c_transport\\.c$")
+list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*spi_transport\\.c$")
+list(FILTER COMMON_SOURCES EXCLUDE REGEX ".*command_handler\\.c$")
+
 # Настройки для loader
 target_compile_options(loader PRIVATE ${COMMON_FLAGS})
 target_include_directories(loader PRIVATE 
@@ -132,7 +137,8 @@ target_include_directories(loader PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/loader/inc
 )
 target_compile_definitions(loader PRIVATE 
-    "USE_HAL_DRIVER" 
+    "USE_HAL_DRIVER"
+    "USE_FULL_LL_DRIVER"
     ${MCU_MODEL} 
     "LOADER_PROJECT" 
     "MBEDTLS_CONFIG_FILE=<mbedtls_config.h>"

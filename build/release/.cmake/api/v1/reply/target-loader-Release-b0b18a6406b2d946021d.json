@@ -35,31 +35,31 @@
 			{
 				"command" : 1,
 				"file" : 0,
-				"line" : 140,
+				"line" : 146,
 				"parent" : 0
 			},
 			{
 				"command" : 2,
 				"file" : 0,
-				"line" : 129,
+				"line" : 134,
 				"parent" : 0
 			},
 			{
 				"command" : 3,
 				"file" : 0,
-				"line" : 134,
+				"line" : 139,
 				"parent" : 0
 			},
 			{
 				"command" : 4,
 				"file" : 0,
-				"line" : 130,
+				"line" : 135,
 				"parent" : 0
 			},
 			{
 				"command" : 5,
 				"file" : 0,
-				"line" : 143,
+				"line" : 149,
 				"parent" : 0
 			}
 		]
@@ -138,6 +138,10 @@
 				{
 					"backtrace" : 4,
 					"define" : "STM32F407xx"
+				},
+				{
+					"backtrace" : 4,
+					"define" : "USE_FULL_LL_DRIVER"
 				},
 				{
 					"backtrace" : 4,
@@ -268,6 +272,10 @@
 				},
 				{
 					"backtrace" : 4,
+					"define" : "USE_FULL_LL_DRIVER"
+				},
+				{
+					"backtrace" : 4,
 					"define" : "USE_HAL_DRIVER"
 				}
 			],
@@ -336,10 +344,7 @@
 				9,
 				10,
 				11,
-				12,
-				13,
-				14,
-				15
+				12
 			]
 		}
 	],
@@ -445,10 +450,7 @@
 				9,
 				10,
 				11,
-				12,
-				13,
-				14,
-				15
+				12
 			]
 		}
 	],
@@ -464,12 +466,6 @@
 			"backtrace" : 6,
 			"compileGroupIndex" : 1,
 			"path" : "common/src/bootloader.c",
-			"sourceGroupIndex" : 1
-		},
-		{
-			"backtrace" : 6,
-			"compileGroupIndex" : 1,
-			"path" : "common/src/command_handler.c",
 			"sourceGroupIndex" : 1
 		},
 		{
@@ -499,12 +495,6 @@
 		{
 			"backtrace" : 6,
 			"compileGroupIndex" : 1,
-			"path" : "common/src/i2c_transport.c",
-			"sourceGroupIndex" : 1
-		},
-		{
-			"backtrace" : 6,
-			"compileGroupIndex" : 1,
 			"path" : "common/src/image.c",
 			"sourceGroupIndex" : 1
 		},
@@ -512,12 +502,6 @@
 			"backtrace" : 6,
 			"compileGroupIndex" : 1,
 			"path" : "common/src/ring_buffer.c",
-			"sourceGroupIndex" : 1
-		},
-		{
-			"backtrace" : 6,
-			"compileGroupIndex" : 1,
-			"path" : "common/src/spi_transport.c",
 			"sourceGroupIndex" : 1
 		},
 		{
