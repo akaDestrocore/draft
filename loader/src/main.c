@@ -516,7 +516,7 @@ int main(void)
   
   // Initialize UART transport
   UARTTransport_Config_t uart_config = {
-    .huart = &huart2,
+    .usart = USART2,
     .baudrate = 115200,
     .timeout = 1000,
     .use_xmodem = 1,

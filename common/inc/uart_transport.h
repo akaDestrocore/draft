@@ -5,11 +5,12 @@
 #include "xmodem.h"
 #include "ring_buffer.h"
 #include "stm32f4xx_hal.h"
+#include "stm32f4xx_ll_usart.h"
 #include <string.h>
 
 // UART transport configuration
 typedef struct {
-    UART_HandleTypeDef* huart;
+    USART_TypeDef* usart;  // Changed from UART_HandleTypeDef* huart
     uint32_t baudrate;
     uint32_t timeout;
     uint8_t use_xmodem;
@@ -52,8 +53,8 @@ int uart_transport_xmodem_receive(uint32_t target_addr);
 XmodemState_t uart_transport_xmodem_state(void);
 
 // Access to buffers for IRQ handler
-Ring_Buffer_t* get_uart_rx_buffer(void);
-Ring_Buffer_t* get_uart_tx_buffer(void);
+RingBuffer_t* get_uart_rx_buffer(void);
+RingBuffer_t* get_uart_tx_buffer(void);
 
 // UART IRQ handler - must be called from the USART2_IRQHandler
 void uart_transport_irq_handler(void);
